@@ -32,13 +32,33 @@ export interface Gif {
     url: string;
     height: number,
     width: number;
+    key?: string;
 }
 
 export interface Props {
-    favorites: { [src: string]: any; };
+    favorites: any[] | { [src: string]: any; };
     trendingCategories: Category[];
+    query?: string;
+    resultItems?: any[];
 }
 
 type WithRequired<T, K extends keyof T> = T & { [P in K]-?: T[P] };
 
 export type Collection = WithRequired<Category, "gifs">;
+
+export type Host = "tenor" | "cdn" | "other";
+export type GifStatus = "ok" | "gone";
+
+export interface GifRecord {
+    key: string;            // getGifKey(url) — stable identity
+    url: string;            // original bare url
+    src: string;            // media src (bare)
+    host: Host;
+    width: number;
+    height: number;
+    format: Format;
+    localExt: string | null;   // file extension on disk; null until cached
+    status: GifStatus;         // "gone" = confirmed 404 NoSuchKey
+    lastCheckedAt: number;     // epoch ms; 0 = never checked
+    reuploadedUrl?: string;    // freshest working url after a reupload
+}

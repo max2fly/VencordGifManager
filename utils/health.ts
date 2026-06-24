@@ -16,10 +16,11 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-// cant change them now eh. My friend uses this plugin. LOVE YOU FREEZER
-export const GIF_ITEM_PREFIX = "gc-moment:";
-export const GIF_COLLECTION_PREFIX = "gc:";
+export type FetchOutcome = { status: number; bodyText?: string };
 
-// Pseudo-category name for the trashcan: cached gifs that are no longer favorited and not
-// in any collection. Chosen to be unlikely to collide with a real search/collection name.
-export const TRASH_CATEGORY_NAME = "🗑 Trash";
+export function classifyFetchResult({ status, bodyText }: FetchOutcome): "ok" | "gone" | "expired" | "transient" {
+    if (status >= 200 && status < 300) return "ok";
+    if (status === 404 && bodyText?.includes("NoSuchKey")) return "gone";
+    if (status === 403) return "expired";
+    return "transient";
+}

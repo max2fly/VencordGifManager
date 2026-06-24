@@ -19,11 +19,23 @@
 import { DataStore } from "@api/index";
 import { Toasts } from "@webpack/common";
 
+import { GIF_COLLECTION_PREFIX } from "./constants";
+import * as GifLibrary from "./GifLibrary";
 import { settings } from "./index";
 import { Collection, Gif } from "./types";
 import { getFormat } from "./utils/getFormat";
+import { getGifKey } from "./utils/gifKey";
 
 export const DATA_COLLECTION_NAME = "gif-collections-collections";
+
+// A gif rendered in the picker has its `src` swapped to a session-only blob: object URL.
+// Never persist that — restore the original media src from the library (or fall back to the
+// stable `url`) so stored collections keep a real, reusable url.
+const normalizeGif = (gif: Gif): Gif => {
+    if (!gif?.src?.startsWith("blob:")) return gif;
+    const original = GifLibrary.getRecord(getGifKey(gif.url))?.src ?? gif.url;
+    return { ...gif, src: original };
+};
 
 // this is here bec async + react class component dont play nice and stutters happen. IF theres a better way of doing it pls let me know
 export let cache_collections: Collection[] = [];
@@ -38,9 +50,10 @@ export const getCollection = async (name: string): Promise<Collection | undefine
 export const getCachedCollection = (name: string): Collection | undefined => cache_collections.find(c => c.name === name);
 
 export const createCollection = async (name: string, gifs: Gif[]): Promise<void> => {
+    gifs = gifs.map(normalizeGif);
 
     const collections = await getCollections();
-    const duplicateCollection = collections.find(c => c.name === `gc:${name}`);
+    const duplicateCollection = collections.find(c => c.name === name);
     if (duplicateCollection)
         return Toasts.show({
             message: "That collection already exists",
@@ -55,7 +68,7 @@ export const createCollection = async (name: string, gifs: Gif[]): Promise<void>
     // gifs shouldnt be empty because to create a collection you need to right click an image / gif and then create it yk. but cant hurt to have a null-conditional check RIGHT?
     const latestGifSrc = gifs[gifs.length - 1]?.src ?? settings.store.defaultEmptyCollectionImage;
     const collection = {
-        name: `gc:${name}`,
+        name,
         src: latestGifSrc,
         format: getFormat(latestGifSrc),
         type: "Category",
@@ -67,6 +80,7 @@ export const createCollection = async (name: string, gifs: Gif[]): Promise<void>
 };
 
 export const addToCollection = async (name: string, gif: Gif): Promise<void> => {
+    gif = normalizeGif(gif);
     const collections = await getCollections();
     const collectionIndex = collections.findIndex(c => c.name === name);
     if (collectionIndex === -1) return console.warn("collection not found");
@@ -97,6 +111,27 @@ export const removeFromCollection = async (id: string): Promise<void> => {
     return await refreshCacheCollection();
 };
 
+// Post-recovery rebase: a gif's dead url has been replaced by a fresh reuploaded one.
+// Update it in place in whatever collection holds it, preserving the gif's position.
+export const replaceGifUrl = async (oldUrl: string, newUrl: string): Promise<void> => {
+    const collections = await getCollections();
+    let changed = false;
+    for (const c of collections) {
+        for (const g of c.gifs) {
+            if (getGifKey(g.url) === getGifKey(oldUrl)) {
+                g.url = newUrl;
+                g.src = newUrl;
+                g.key = getGifKey(newUrl);
+                changed = true;
+            }
+        }
+    }
+    if (changed) {
+        await DataStore.set(DATA_COLLECTION_NAME, collections);
+        await refreshCacheCollection();
+    }
+};
+
 export const deleteCollection = async (name: string): Promise<void> => {
 
     const collections = await getCollections();
@@ -107,6 +142,17 @@ export const deleteCollection = async (name: string): Promise<void> => {
 
 
 export const refreshCacheCollection = async (): Promise<void> => {
-    cache_collections = await getCollections();
+    const collections = await getCollections();
+    // Migration: older versions stored collection names with a "gc:" prefix. We no
+    // longer use a prefix (collections are matched by exact name), so strip it once.
+    let changed = false;
+    for (const c of collections) {
+        if (c.name.startsWith(GIF_COLLECTION_PREFIX)) {
+            c.name = c.name.slice(GIF_COLLECTION_PREFIX.length);
+            changed = true;
+        }
+    }
+    if (changed) await DataStore.set(DATA_COLLECTION_NAME, collections);
+    cache_collections = collections;
 };
 

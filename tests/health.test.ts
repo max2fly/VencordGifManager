@@ -16,10 +16,20 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-// cant change them now eh. My friend uses this plugin. LOVE YOU FREEZER
-export const GIF_ITEM_PREFIX = "gc-moment:";
-export const GIF_COLLECTION_PREFIX = "gc:";
+import assert from "node:assert/strict";
 
-// Pseudo-category name for the trashcan: cached gifs that are no longer favorited and not
-// in any collection. Chosen to be unlikely to collide with a real search/collection name.
-export const TRASH_CATEGORY_NAME = "🗑 Trash";
+import { classifyFetchResult } from "../utils/health";
+
+assert.equal(classifyFetchResult({ status: 200 }), "ok");
+assert.equal(
+    classifyFetchResult({ status: 404, bodyText: "<Error><Code>NoSuchKey</Code></Error>" }),
+    "gone"
+);
+// 404 without NoSuchKey (e.g. bare-url/permission) is NOT a confirmed delete
+assert.equal(classifyFetchResult({ status: 404, bodyText: "" }), "transient");
+assert.equal(classifyFetchResult({ status: 403 }), "expired");
+assert.equal(classifyFetchResult({ status: 500 }), "transient");
+assert.equal(classifyFetchResult({ status: 0 }), "transient");
+assert.equal(classifyFetchResult({ status: -1 }), "transient");
+
+console.log("health.test.ts passed");

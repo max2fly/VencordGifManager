@@ -23,17 +23,36 @@ import { definePluginSettings } from "@api/Settings";
 import { Devs } from "@utils/constants";
 import { ModalContent, ModalFooter, ModalHeader, ModalProps, ModalRoot, openModal } from "@utils/modal";
 import definePlugin, { OptionType } from "@utils/types";
-import { Alerts, Button, ContextMenuApi, FluxDispatcher, Forms, Menu, React, TextInput, useCallback, useState } from "@webpack/common";
+import { Alerts, Button, ContextMenuApi, FluxDispatcher, Forms, Menu, React, TextInput, Toasts, useCallback, useState } from "@webpack/common";
 
 import * as CollectionManager from "./CollectionManager";
-import { GIF_COLLECTION_PREFIX, GIF_ITEM_PREFIX } from "./constants";
-import { Category, Collection, Gif, Props } from "./types";
+import { GIF_ITEM_PREFIX, TRASH_CATEGORY_NAME } from "./constants";
+import * as GifLibrary from "./GifLibrary";
+import { getObjectUrl, getObjectUrlSync, revokeAll } from "./gifCache";
+import { Collection, Gif, GifRecord, Props } from "./types";
+import { cacheGif, healthCheck } from "./utils/favorites";
 import { getFormat } from "./utils/getFormat";
 import { getGif } from "./utils/getGif";
+import { classifyHost, getGifKey } from "./utils/gifKey";
+import { captureFavUpdater as captureFavUpdaterImpl, nativeFavorite } from "./utils/nativeFavorites";
+import { onMessageCreate, recoverGif } from "./utils/reupload";
+import { deleteOrphan, getOrphans, isOrphan, purgeTrash, setFavoriteKeys, sweepLeakedFiles } from "./utils/trash";
 import { downloadCollections, uploadGifCollections } from "./utils/settingsUtils";
 import { uuidv4 } from "./utils/uuidv4";
 
 export const settings = definePluginSettings({
+    gifPasteHint: {
+        type: OptionType.COMPONENT,
+        description: "GifPaste tip",
+        component: () => (
+            <Forms.FormText style={{ marginBottom: "8px" }}>
+                Tip: enable the built-in <b>GifPaste</b> plugin if you want clicking a gif to insert
+                its link into the chat box instead of sending immediately. GifManager works alongside
+                it and only takes over the click for gifs whose source was deleted (to recover them
+                from your local backup).
+            </Forms.FormText>
+        )
+    },
     defaultEmptyCollectionImage: {
         description: "The image / gif that will be shown when a collection has no images / gifs",
         type: OptionType.STRING,
@@ -65,6 +84,25 @@ export const settings = definePluginSettings({
             <Button onClick={downloadCollections}>
                 Export Collections
             </Button>
+    },
+    purgeTrash: {
+        type: OptionType.COMPONENT,
+        description: "Empty the trashcan (permanently delete all cached gifs that aren't favorited or in a collection)",
+        component: () =>
+            <Button color={Button.Colors.RED} onClick={() => Alerts.show({
+                title: "Empty trashcan?",
+                body: "This permanently deletes the local backups of all cached gifs that are no longer favorited or in a collection. This cannot be undone.",
+                confirmText: "Delete",
+                confirmColor: Button.Colors.RED,
+                cancelText: "Nevermind",
+                onConfirm: async () => {
+                    const n = await purgeTrash();
+                    const leaked = await sweepLeakedFiles();
+                    Toasts.show({ message: `Removed ${n} trashed gif(s) + ${leaked} leaked file(s)`, type: Toasts.Type.SUCCESS, id: Toasts.genId() });
+                }
+            })}>
+                Empty Trashcan
+            </Button>
     }
 });
 
@@ -88,10 +126,32 @@ const addCollectionContextMenuPatch: NavContextMenuPatchCallback = (children, pr
 };
 
 
+function collectionKeySet(): Set<string> {
+    const set = new Set<string>();
+    for (const c of CollectionManager.cache_collections)
+        for (const g of c.gifs) set.add(getGifKey(g.url));
+    return set;
+}
+
+// Coalesce the many "a gif just became locally available" callbacks (progressive
+// hydration of a large favorites list) into a single re-render, so we don't
+// forceUpdate hundreds of times.
+let updateTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingInstance: { forceUpdate?: () => void; } | null = null;
+function scheduleUpdate(instance: { forceUpdate?: () => void; }) {
+    pendingInstance = instance;
+    if (updateTimer) return;
+    updateTimer = setTimeout(() => {
+        updateTimer = null;
+        const i = pendingInstance;
+        pendingInstance = null;
+        i?.forceUpdate?.();
+    }, 120);
+}
+
 export default definePlugin({
-    name: "Gif Collection",
-    // need better description eh
-    description: "Allows you to have collections of gifs",
+    name: "GifManager",
+    description: "Locally backs up favorited gifs and organizes them into collections",
     authors: [Devs.Aria, {id: 236950175480807424n, name: "max2fly" }],
     patches: [
         {
@@ -101,12 +161,6 @@ export default definePlugin({
                 {
                     match: /(render\(\){)(.{1,50}getItemGrid)/,
                     replace: "$1;$self.insertCollections(this);$2"
-                },
-                // Hides the gc: from the name gc:monkeh -> monkeh
-                // https://regex101.com/r/uEjLFq/1
-                {
-                    match: /(className:\w\.categoryName,children:)(\i)/,
-                    replace: "$1$self.hidePrefix($2),"
                 },
             ]
         },
@@ -142,23 +196,71 @@ export default definePlugin({
                     "$1if($self.shouldStopFetch(arguments[0])) return;$2"
             }
         },
+        // Clicking a gif whose remote source is gone should recover from the local backup
+        // instead of sending a dead link. This guard runs before the default send / GifPaste's
+        // paste (userplugin patches apply after built-ins), and only fires for broken gifs —
+        // everything else falls through untouched.
+        {
+            find: "handleSelectGIF=",
+            replacement: {
+                match: /handleSelectGIF=(\i)=>\{/,
+                replace: "$&if($self.handleBrokenSelect($1))return;"
+            }
+        },
+        // Capture Discord's favorite-gifs proto updater (the thing the ⭐ button drives) so we
+        // can add/remove favorites by arbitrary url during recovery rebase. Keyed on the stable
+        // "favoriteGifs" string literal; fires the first time you favorite/unfavorite anything.
+        {
+            find: "updateAsync(\"favoriteGifs\"",
+            replacement: {
+                match: /(\i\.\i)\.updateAsync\("favoriteGifs"/,
+                replace: "$self.captureFavUpdater($1),$1.updateAsync(\"favoriteGifs\""
+            }
+        },
     ],
 
     settings,
 
 
     start() {
+        GifLibrary.refreshLibrary();
         CollectionManager.refreshCacheCollection();
 
         addContextMenuPatch("message", addCollectionContextMenuPatch);
     },
 
     stop() {
+        revokeAll();
         removeContextMenuPatch("message", addCollectionContextMenuPatch);
     },
-    CollectionManager,
+    flux: {
+        // No ADD_FAVORITE_GIF action exists; favoriting emits a TRACK analytics event.
+        // Best-effort eager cache; the render path is the reliable backbone.
+        TRACK(e: any) {
+            if (e?.event !== "gif_favorited") return;
+            const p = e.properties ?? {};
+            const url = p.url ?? p.gif_url ?? p.gifUrl ?? p.src;
+            if (!url) return; // payload shape unknown/empty — render path will catch it
+            void cacheGif({
+                id: "", url,
+                src: p.src ?? url,
+                width: p.width ?? 0, height: p.height ?? 0
+            }).catch(() => {});
+        },
+        // Detects when a recovered gif is actually sent, so we can rebase it to the new url.
+        MESSAGE_CREATE(e: any) {
+            onMessageCreate(e);
+        }
+    },
 
-    oldTrendingCat: null as Category[] | null,
+    // Captures the native favorite-gifs proto updater (from the capture patch above).
+    captureFavUpdater(updater: any) {
+        captureFavUpdaterImpl(updater);
+    },
+
+    CollectionManager,
+    GifLibrary,
+
     sillyInstance: null as any,
     sillyContentInstance: null as any,
 
@@ -168,52 +270,158 @@ export default definePlugin({
     },
 
     renderContent(instance) {
-        if (instance.props.query.startsWith(GIF_COLLECTION_PREFIX)) {
-            this.sillyContentInstance = instance;
-            const collection = this.collections.find(c => c.name === instance.props.query);
-            if (!collection) return;
-            instance.props.resultItems = collection.gifs.map(g => ({
-                id: g.id,
-                format: getFormat(g.src),
-                src: g.src,
-                url: g.url,
-                width: g.width,
-                height: g.height
-            })).reverse();
+        // Hide collection members from the favorites grid + render favorites from disk + backfill cache.
+        // props.favorites is the live favorites array (same source favGifSearch uses).
+        if (Array.isArray(instance.props.favorites)) {
+            const inCol = collectionKeySet();
+            const favKeys = new Set<string>();
+            const out: any[] = [];
+            for (const fav of instance.props.favorites) {
+                const key = getGifKey(fav.url);
+                favKeys.add(key);
+                // Maintain backup + health for ALL favorites — including collection members,
+                // which stay native favorites — using the fresh signed url Discord gives us here.
+                cacheGif(fav).then(newly => { if (newly) scheduleUpdate(instance); });
+                healthCheck(fav);
+
+                if (inCol.has(key)) continue;            // hidden from the grid (lives in a collection)
+
+                const local = getObjectUrlSync(key);
+                out.push(local ? { ...fav, src: local } : fav);
+            }
+            instance.props.favorites = out;
+            // Snapshot what's favorited so the trashcan knows which cached gifs are orphaned.
+            setFavoriteKeys(favKeys);
         }
 
-    },
+        // Trash view: cached gifs no longer favorited / in a collection. These are LOCAL-only by
+        // design — never emit a remote src (it would 404 on the dead cdn url). Render only items
+        // whose local blob is ready; kick hydration for the rest so they appear next render.
+        if (instance.props.query === TRASH_CATEGORY_NAME) {
+            this.sillyContentInstance = instance;
+            instance.props.resultItems = getOrphans().map(r => {
+                const local = getObjectUrlSync(r.key);
+                if (!local) {
+                    // disk read ONLY — never download (trash is local-by-design, no requests)
+                    getObjectUrl(r).then(url => { if (url) scheduleUpdate(instance); });
+                    return null; // not hydrated yet — skip until the local blob is ready
+                }
+                return { id: r.key, format: r.format, src: local, url: r.url, width: r.width, height: r.height };
+            }).filter(Boolean).reverse();
+            return;
+        }
 
-    hidePrefix(name: string) {
-        return name.split(":").length > 1 ? name.replace(/.+?:/, "") : name;
+        // Collection view: swap in the collection's gifs, rendered from disk.
+        // Collections are matched by exact name (the clicked category name lands in the query).
+        const collection = instance.props.query ? this.collections.find(c => c.name === instance.props.query) : undefined;
+        if (collection) {
+            this.sillyContentInstance = instance;
+            instance.props.resultItems = collection.gifs.map(g => {
+                const key = getGifKey(g.url);
+                const local = getObjectUrlSync(key);
+                if (!local) cacheGif(g).then(newly => { if (newly) scheduleUpdate(instance); });
+                return {
+                    id: g.id,
+                    format: getFormat(g.src),
+                    src: local ?? g.src,
+                    url: g.url,
+                    width: g.width,
+                    height: g.height
+                };
+            }).reverse();
+        }
     },
 
     insertCollections(instance: { props: Props; }) {
         try {
             this.sillyInstance = instance;
-            if (instance.props.trendingCategories.length && instance.props.trendingCategories[0].type === "Trending")
-                this.oldTrendingCat = instance.props.trendingCategories;
+            // Render each collection's cover from the local cache. The stored cover src is a
+            // signature-stripped CDN url that 404s as an <img>; prefer the local blob, fall
+            // back to the durable (non-CDN) src or the placeholder so we never request a dead url.
+            const cats: any[] = this.collections.slice().reverse().map(c => {
+                const cover = c.gifs[c.gifs.length - 1];
+                if (!cover) return c;
+                const key = getGifKey(cover.url);
+                const local = getObjectUrlSync(key);
+                if (!local) cacheGif(cover).then(newly => { if (newly) scheduleUpdate(instance); });
+                const fallback = classifyHost(cover.url) === "cdn" ? settings.store.defaultEmptyCollectionImage : c.src;
+                return { ...c, src: local ?? fallback };
+            });
 
+            // Append the trashcan (cached gifs no longer favorited / in a collection), if any.
+            const orphans = getOrphans();
+            if (orphans.length) {
+                const coverRec = orphans[orphans.length - 1];
+                cats.push({
+                    type: "Category",
+                    name: TRASH_CATEGORY_NAME,
+                    src: getObjectUrlSync(coverRec.key) ?? settings.store.defaultEmptyCollectionImage,
+                    format: coverRec.format,
+                    gifs: []
+                });
+            }
 
-            if (this.oldTrendingCat != null)
-                instance.props.trendingCategories = this.collections.reverse().concat(this.oldTrendingCat as Collection[]);
-
+            instance.props.trendingCategories = cats;
         } catch (err) {
             console.error(err);
         }
     },
 
     shouldStopFetch(query: string) {
-        if (query.startsWith(GIF_COLLECTION_PREFIX)) {
-            const collection = this.collections.find(c => c.name === query);
-            if (collection != null) return true;
+        // A query matching a collection name (or the trashcan) is a category click, not a search.
+        return query === TRASH_CATEGORY_NAME || (query != null && this.collections.some(c => c.name === query));
+    },
+
+    // Returns true (and starts recovery) when the clicked gif's remote source is confirmed gone
+    // but we have a local backup — so the click reuploads from disk instead of sending a dead link.
+    handleBrokenSelect(gif: { url?: string; }) {
+        if (!gif?.url) return false;
+        const rec = GifLibrary.getRecord(getGifKey(gif.url));
+        if (rec?.status === "gone" && rec.localExt) {
+            void recoverGif(rec);
+            return true;
         }
         return false;
     },
 
+    // Right-click toggle: manually mark a gif's CDN source as gone (forces recover-on-click)
+    // or clear that flag if it was set in error. A manual override of the 24h health check.
+    toggleForget(record: GifRecord) {
+        GifLibrary.setStatus(record.key, record.status === "gone" ? "ok" : "gone");
+        this.sillyContentInstance?.forceUpdate?.();
+        this.sillyInstance?.forceUpdate?.();
+    },
+
+    // Shared gif right-click actions (used for favorites AND collection gifs): add-to-collection,
+    // recover/reupload from backup, and force-forget. Returns an array of Menu items (+ nulls,
+    // which React ignores).
+    gifActionItems(item: any) {
+        const record = item?.url ? GifLibrary.getRecord(getGifKey(item.url)) : undefined;
+        return [
+            MenuThingy({ gif: { ...item, id: uuidv4() } }),
+            record?.localExt
+                ? <Menu.MenuItem
+                    key="reupload-from-backup"
+                    id="reupload-from-backup"
+                    label={record.status === "gone" ? "Recover From Backup" : "Reupload From Backup"}
+                    action={() => recoverGif(record)}
+                />
+                : null,
+            record
+                ? <Menu.MenuItem
+                    key="toggle-forget-cdn"
+                    id="toggle-forget-cdn"
+                    color={record.status === "gone" ? undefined : "danger"}
+                    label={record.status === "gone" ? "Unmark — CDN Is Fine" : "Force-Forget CDN (mark gone)"}
+                    action={() => this.toggleForget(record)}
+                />
+                : null
+        ];
+    },
+
     collectionContextMenu(e: React.UIEvent, instance) {
         const { item } = instance.props;
-        if (item?.name?.startsWith(GIF_COLLECTION_PREFIX))
+        if (item?.name && this.collections.some(c => c.name === item.name))
             return ContextMenuApi.openContextMenu(e, () =>
                 <RemoveItemContextMenu
                     type="collection"
@@ -221,33 +429,69 @@ export default definePlugin({
                     nameOrId={instance.props.item.name} />
             );
         if (item?.id?.startsWith(GIF_ITEM_PREFIX)) {
-            ContextMenuApi.openContextMenu(e, () =>
-                <RemoveItemContextMenu
-                    type="gif"
-                    onConfirm={() => { this.sillyContentInstance && this.sillyContentInstance.forceUpdate(); }}
-                    nameOrId={instance.props.item.id}
-                />);
-            instance.props.focused = false;
-            instance.forceUpdate();
-            this.sillyContentInstance && this.sillyContentInstance.forceUpdate();
-            return;
+            const refresh = () => {
+                instance.props.focused = false;
+                instance.forceUpdate();
+                this.sillyContentInstance && this.sillyContentInstance.forceUpdate();
+            };
+            return ContextMenuApi.openContextMenu(e, () =>
+                <Menu.Menu
+                    navId="gif-collection-id"
+                    onClose={() => FluxDispatcher.dispatch({ type: "CONTEXT_MENU_CLOSE" })}
+                    aria-label="Gif"
+                >
+                    {/* same actions as the favorites menu — a collection gif is hidden from favorites */}
+                    {this.gifActionItems(item)}
+                    <Menu.MenuSeparator />
+                    <Menu.MenuItem
+                        key="remove-from-collection"
+                        id="remove-from-collection"
+                        color="danger"
+                        label="Remove From Collection"
+                        action={() => CollectionManager.removeFromCollection(item.id).then(refresh)}
+                    />
+                </Menu.Menu>
+            );
+        }
+
+        // Trashcan item: a cached gif that's no longer favorited / in a collection.
+        if (item?.url && isOrphan(getGifKey(item.url))) {
+            const record = GifLibrary.getRecord(getGifKey(item.url))!;
+            const refresh = () => { this.sillyContentInstance?.forceUpdate?.(); this.sillyInstance?.forceUpdate?.(); };
+            return ContextMenuApi.openContextMenu(e, () =>
+                <Menu.Menu
+                    navId="gif-collection-id"
+                    onClose={() => FluxDispatcher.dispatch({ type: "CONTEXT_MENU_CLOSE" })}
+                    aria-label="Trash"
+                >
+                    <Menu.MenuItem
+                        key="trash-restore" id="trash-restore" label="Restore To Favorites"
+                        action={() => { nativeFavorite({ id: "", url: record.url, src: record.url, width: record.width, height: record.height }); refresh(); }}
+                    />
+                    <Menu.MenuItem
+                        key="trash-resend" id="trash-resend" label="Send From Backup"
+                        action={() => recoverGif(record)}
+                    />
+                    <Menu.MenuItem
+                        key="trash-delete" id="trash-delete" color="danger" label="Delete Permanently"
+                        action={() => { deleteOrphan(record).then(refresh); }}
+                    />
+                </Menu.Menu>
+            );
         }
 
         const { src, url, height, width } = item;
-        if (src && url && height != null && width != null && !item.id?.startsWith(GIF_ITEM_PREFIX))
+        if (src && url && height != null && width != null && !item.id?.startsWith(GIF_ITEM_PREFIX)) {
             return ContextMenuApi.openContextMenu(e, () =>
                 <Menu.Menu
                     navId="gif-collection-id"
                     onClose={() => FluxDispatcher.dispatch({ type: "CONTEXT_MENU_CLOSE" })}
                     aria-label="Gif Collections"
                 >
-
-                    {/* if i do it the normal way i get a invalid context menu thingy error -> Menu API only allows Items and groups of Items as children.*/}
-                    {MenuThingy({ gif: { ...item, id: uuidv4() } })}
-
-
+                    {this.gifActionItems(item)}
                 </Menu.Menu>
             );
+        }
         return null;
     },
 });
@@ -300,7 +544,7 @@ const MenuThingy: React.FC<{ gif: Gif; }> = ({ gif }) => {
                 <Menu.MenuItem
                     key={col.name}
                     id={col.name}
-                    label={col.name.replace(/.+?:/, "")}
+                    label={col.name}
                     action={() => CollectionManager.addToCollection(col.name, gif)}
                 />
             ))}

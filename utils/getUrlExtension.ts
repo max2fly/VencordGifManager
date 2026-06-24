@@ -17,7 +17,13 @@
 */
 
 export function getUrlExtension(url: string) {
-    // tennor stuff is like //media.tenor/blah/blah
-    if (!url.startsWith("https:")) url = "https:" + url;
-    return new URL(url).pathname.split(".").pop();
+    try {
+        // blob: object URLs have no meaningful extension and break the prefix hack below
+        if (url.startsWith("blob:")) return undefined;
+        // tennor stuff is like //media.tenor/blah/blah
+        if (!url.startsWith("https:")) url = "https:" + url;
+        return new URL(url).pathname.split(".").pop();
+    } catch {
+        return undefined;
+    }
 }
