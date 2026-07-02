@@ -16,8 +16,81 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+import { findByCodeLazy } from "@webpack";
+
 import { Gif } from "../types";
 import { getGifKey } from "./gifKey";
+
+// Discord's REAL favorite-gif function (what the picker ⭐ invokes). It builds the proto entry in
+// Discord's exact shape — crucially with a real, loadable `src` — so the favorite actually shows in
+// the native Favorites tab. Our hand-rolled addToProto set src to the signature-stripped key (a
+// bare CDN url that 404s), which the picker couldn't render, so media fell through to the trashcan.
+// Found the same way the reference plugin did: the function whose source calls updateAsync on
+// "favoriteGifs" and references the format field it writes onto the entry.
+const RealFavoriteGif: ((entry: { url: string; src: string; width?: number; height?: number; format?: number; order?: number; }) => void) | undefined =
+    findByCodeLazy('updateAsync("favoriteGifs"', "format");
+
+// Discord's real UN-favorite function: deletes the entry (tries both the raw url key and its
+// normalized form) and tracks GIF_UNFAVORITED. Takes the url.
+const RealUnfavoriteGif: ((url: string) => void) | undefined =
+    findByCodeLazy('updateAsync("favoriteGifs"', "GIF_UNFAVORITED");
+
+// Discord's favorite-gifs getter: returns the `{ [key]: entry }` map of current favorites.
+const getFavoriteGifsMap: (() => Record<string, any>) | undefined =
+    findByCodeLazy("favoriteGifs?.gifs");
+
+/**
+ * Favorite arbitrary media through Discord's own favorite function (correct entry shape + real src),
+ * falling back to our proto reconstruction if the function can't be located. Returns true on the
+ * real path.
+ */
+export function nativeFavoriteReal(gif: Gif & { format?: number; }): boolean {
+    if (typeof RealFavoriteGif !== "function") return false;
+    try {
+        RealFavoriteGif({
+            url: gif.url,
+            src: gif.src,
+            width: gif.width,
+            height: gif.height,
+            format: gif.format ?? 0,
+            order: 0
+        });
+        return true;
+    } catch (e) {
+        console.error("[GifManager] native favorite (real fn) failed", e);
+        return false;
+    }
+}
+
+/** Un-favorite media via Discord's own function. Returns true if the function was available. */
+export function nativeUnfavoriteReal(url: string): boolean {
+    if (typeof RealUnfavoriteGif !== "function") return false;
+    try {
+        RealUnfavoriteGif(url);
+        return true;
+    } catch (e) {
+        console.error("[GifManager] native unfavorite (real fn) failed", e);
+        return false;
+    }
+}
+
+// Compare favorites by URL PATHNAME only — robust to host (media vs cdn), query, and signature
+// differences between what we favorited with and what Discord stored the key as.
+function pathOf(u: string): string {
+    try { return new URL(u).pathname.replace(/\/+$/, ""); } catch { return u; }
+}
+
+/** True if `url` is currently in Discord's native favorite-gifs (matched by pathname). */
+export function isNativeFavorite(url: string): boolean {
+    try {
+        const map = getFavoriteGifsMap?.();
+        if (!map) return false;
+        const target = pathOf(url);
+        return Object.keys(map).some(k => pathOf(k) === target);
+    } catch {
+        return false;
+    }
+}
 
 // Discord favorites live in the Frecency user-settings proto; there's no exported
 // add/remove. We capture the proto updater Discord itself uses

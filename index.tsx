@@ -27,6 +27,7 @@ import { Alerts, Button, ContextMenuApi, FluxDispatcher, Forms, Menu, React, Tex
 
 import * as CollectionManager from "./CollectionManager";
 import { GIF_ITEM_PREFIX, TRASH_CATEGORY_NAME } from "./constants";
+import { isReservedName, regularCollectionKeys, sortedRegularCollections } from "./utils/collectionOps";
 import * as GifLibrary from "./GifLibrary";
 import { getObjectUrl, getObjectUrlSync, revokeAll } from "./gifCache";
 import { Collection, Gif, GifRecord, Props } from "./types";
@@ -34,11 +35,14 @@ import { cacheGif, healthCheck } from "./utils/favorites";
 import { getFormat } from "./utils/getFormat";
 import { getGif } from "./utils/getGif";
 import { classifyHost, getGifKey } from "./utils/gifKey";
-import { captureFavUpdater as captureFavUpdaterImpl, nativeFavorite } from "./utils/nativeFavorites";
+import { captureFavUpdater as captureFavUpdaterImpl, nativeFavorite, nativeFavoriteReal } from "./utils/nativeFavorites";
 import { onMessageCreate, recoverGif } from "./utils/reupload";
 import { deleteOrphan, getOrphans, isOrphan, purgeTrash, setFavoriteKeys, sweepLeakedFiles } from "./utils/trash";
 import { downloadCollections, uploadGifCollections } from "./utils/settingsUtils";
 import { uuidv4 } from "./utils/uuidv4";
+import { ensureDragStyle, removeDragStyle, startDragReorder } from "./utils/dragReorder";
+import { disableMediaStar, enableMediaStar, loadPersistedFavorites, syncFavoritedUrls } from "./utils/mediaStar";
+import { getItemFromNode } from "./utils/reactInternals";
 
 export const settings = definePluginSettings({
     gifPasteHint: {
@@ -122,15 +126,27 @@ const addCollectionContextMenuPatch: NavContextMenuPatchCallback = (children, pr
             // if i do it the normal way i get a invalid context menu thingy error -> Menu API only allows Items and groups of Items as children.
             MenuThingy({ gif })
         );
+        group.push(
+            <Menu.MenuItem
+                id="gifmgr-favorite-media"
+                key="gifmgr-favorite-media"
+                label="Favorite Image/Video"
+                action={() => {
+                    const entry = { id: "", url: gif.url, src: gif.src, width: gif.width, height: gif.height, format: getFormat(gif.src) };
+                    // Prefer Discord's real favorite fn (correct entry + loadable src → shows in the
+                    // native Favorites tab); fall back to our proto reconstruction if not found.
+                    if (!nativeFavoriteReal(entry)) nativeFavorite(entry);
+                    void cacheGif(gif);
+                }}
+            />
+        );
     }
 };
 
 
 function collectionKeySet(): Set<string> {
-    const set = new Set<string>();
-    for (const c of CollectionManager.cache_collections)
-        for (const g of c.gifs) set.add(getGifKey(g.url));
-    return set;
+    // Single source of truth (excludes reserved: media favorites must not hide themselves).
+    return regularCollectionKeys(CollectionManager.cache_collections);
 }
 
 // Coalesce the many "a gif just became locally available" callbacks (progressive
@@ -168,7 +184,7 @@ export default definePlugin({
             find: "renderEmptyFavorite",
             replacement: {
                 match: /render\(\){.{1,500}onClick:this\.handleClick,/,
-                replace: "$&onContextMenu: (e) => $self.collectionContextMenu(e, this),"
+                replace: "$&onContextMenu: (e) => $self.collectionContextMenu(e, this),onMouseDown: (e) => $self.onItemMouseDown(e, this),"
             }
         },
         {
@@ -225,12 +241,17 @@ export default definePlugin({
     start() {
         GifLibrary.refreshLibrary();
         CollectionManager.refreshCacheCollection();
+        ensureDragStyle();
+        void loadPersistedFavorites();
+        enableMediaStar();
 
         addContextMenuPatch("message", addCollectionContextMenuPatch);
     },
 
     stop() {
         revokeAll();
+        removeDragStyle();
+        disableMediaStar();
         removeContextMenuPatch("message", addCollectionContextMenuPatch);
     },
     flux: {
@@ -273,6 +294,10 @@ export default definePlugin({
         // Hide collection members from the favorites grid + render favorites from disk + backfill cache.
         // props.favorites is the live favorites array (same source favGifSearch uses).
         if (Array.isArray(instance.props.favorites)) {
+            this.sillyContentInstance = instance;
+            // Reconcile the media-star's favorited-state set against the authoritative native
+            // favorites list (catches favorites added/removed on another device).
+            syncFavoritedUrls(instance.props.favorites.map((f: any) => f?.url).filter(Boolean));
             const inCol = collectionKeySet();
             const favKeys = new Set<string>();
             const out: any[] = [];
@@ -338,15 +363,18 @@ export default definePlugin({
             // Render each collection's cover from the local cache. The stored cover src is a
             // signature-stripped CDN url that 404s as an <img>; prefer the local blob, fall
             // back to the durable (non-CDN) src or the placeholder so we never request a dead url.
-            const cats: any[] = this.collections.slice().reverse().map(c => {
+            const cats: any[] = [];
+
+            // Regular collections, in explicit `order`.
+            for (const c of sortedRegularCollections(this.collections)) {
                 const cover = c.gifs[c.gifs.length - 1];
-                if (!cover) return c;
+                if (!cover) { cats.push(c); continue; }
                 const key = getGifKey(cover.url);
                 const local = getObjectUrlSync(key);
                 if (!local) cacheGif(cover).then(newly => { if (newly) scheduleUpdate(instance); });
                 const fallback = classifyHost(cover.url) === "cdn" ? settings.store.defaultEmptyCollectionImage : c.src;
-                return { ...c, src: local ?? fallback };
-            });
+                cats.push({ ...c, src: local ?? fallback });
+            }
 
             // Append the trashcan (cached gifs no longer favorited / in a collection), if any.
             const orphans = getOrphans();
@@ -419,15 +447,70 @@ export default definePlugin({
         ];
     },
 
+    onItemMouseDown(e: React.MouseEvent, instance: any) {
+        if (e.button !== 0) return;
+        const item = instance?.props?.item;
+        if (!item) return;
+        const sourceEl = e.currentTarget as HTMLElement;
+
+        // (A) Gif tile inside an open collection view (never Trash / favorites / search).
+        if (item.id && item.url && item.name == null) {
+            const contentInst = this.sillyContentInstance;
+            const collectionName: string | undefined = contentInst?.props?.query;
+            if (!collectionName || collectionName === TRASH_CATEGORY_NAME) return;
+            if (!this.collections.some(c => c.name === collectionName)) return;
+            startDragReorder({
+                startX: e.clientX, startY: e.clientY, button: e.button, sourceEl,
+                onDrop: (x, y) => {
+                    const target = getItemFromNode(document.elementFromPoint(x, y));
+                    // Target must be another gif tile (has url+id), not a category.
+                    if (target?.url && target.id && target.id !== item.id)
+                        CollectionManager.reorderGif(collectionName, item.id, target.id).then(() => contentInst?.forceUpdate?.());
+                }
+            });
+            return;
+        }
+
+        // (B) Collection tile in the categories row (regular collections only; not reserved).
+        if (item.name && !isReservedName(item.name) && this.collections.some(c => c.name === item.name)) {
+            const catsInst = this.sillyInstance;
+            startDragReorder({
+                startX: e.clientX, startY: e.clientY, button: e.button, sourceEl,
+                onDrop: (x, y) => {
+                    const target = getItemFromNode(document.elementFromPoint(x, y));
+                    const targetName = target?.name;
+                    if (targetName && !isReservedName(targetName) && targetName !== item.name && this.collections.some(c => c.name === targetName))
+                        CollectionManager.reorderCollection(item.name, targetName).then(() => catsInst?.forceUpdate?.());
+                }
+            });
+        }
+    },
+
     collectionContextMenu(e: React.UIEvent, instance) {
         const { item } = instance.props;
-        if (item?.name && this.collections.some(c => c.name === item.name))
+        if (item?.name && this.collections.some(c => c.name === item.name)) {
+            if (isReservedName(item.name)) return; // media favorites: not renamable/deletable
+            const refresh = () => { this.sillyInstance && this.sillyInstance.forceUpdate(); };
             return ContextMenuApi.openContextMenu(e, () =>
-                <RemoveItemContextMenu
-                    type="collection"
-                    onConfirm={() => { this.sillyInstance && this.sillyInstance.forceUpdate(); }}
-                    nameOrId={instance.props.item.name} />
+                <Menu.Menu navId="gif-collection-id" onClose={() => FluxDispatcher.dispatch({ type: "CONTEXT_MENU_CLOSE" })} aria-label="Collection">
+                    <Menu.MenuItem
+                        key="rename-collection" id="rename-collection" label="Rename Collection"
+                        action={() => openModal(mp => <RenameCollectionModal currentName={item.name} onClose={mp.onClose} modalProps={mp} />)}
+                    />
+                    <Menu.MenuItem
+                        key="delete-collection" id="delete-collection" color="danger" label="Delete Collection"
+                        action={() => Alerts.show({
+                            title: "Are you sure?",
+                            body: "Do you really want to delete this collection?",
+                            confirmText: "Delete",
+                            confirmColor: Button.Colors.RED,
+                            cancelText: "Nevermind",
+                            onConfirm: async () => { await CollectionManager.deleteCollection(item.name); refresh(); }
+                        })}
+                    />
+                </Menu.Menu>
             );
+        }
         if (item?.id?.startsWith(GIF_ITEM_PREFIX)) {
             const refresh = () => {
                 instance.props.focused = false;
@@ -495,38 +578,6 @@ export default definePlugin({
         return null;
     },
 });
-
-
-
-// stolen from spotify controls
-const RemoveItemContextMenu = ({ type, nameOrId, onConfirm }: { type: "gif" | "collection", nameOrId: string, onConfirm: () => void; }) => (
-    <Menu.Menu
-        navId="gif-collection-id"
-        onClose={() => FluxDispatcher.dispatch({ type: "CONTEXT_MENU_CLOSE" })}
-        aria-label={type === "collection" ? "Delete Collection" : "Remove"}
-    >
-        <Menu.MenuItem
-            key="delete-collection"
-            id="delete-collection"
-            label={type === "collection" ? "Delete Collection" : "Remove"}
-            action={() =>
-                // Stolen from Review components
-                type === "collection" ? Alerts.show({
-                    title: "Are you sure?",
-                    body: "Do you really want to delete this collection?",
-                    confirmText: "Delete",
-                    confirmColor: Button.Colors.RED,
-                    cancelText: "Nevermind",
-                    onConfirm: async () => {
-                        await CollectionManager.deleteCollection(nameOrId);
-                        onConfirm();
-                    }
-                }) : CollectionManager.removeFromCollection(nameOrId).then(() => onConfirm())}
-        >
-
-        </Menu.MenuItem>
-    </Menu.Menu>
-);
 
 
 
@@ -601,6 +652,34 @@ function CreateCollectionModal({ gif, onClose, modalProps }: CreateCollectionMod
                         >
                             Create
                         </Button>
+                    </ModalFooter>
+                </div>
+            </form>
+        </ModalRoot>
+    );
+}
+
+function RenameCollectionModal({ currentName, onClose, modalProps }: { currentName: string; onClose: () => void; modalProps: ModalProps; }) {
+    const [name, setName] = useState(currentName);
+
+    const onSubmit = useCallback(async (e: React.FormEvent<HTMLFormElement> | React.MouseEvent<HTMLButtonElement, MouseEvent>) => {
+        e.preventDefault();
+        if (!name.trim().length) return;
+        const ok = await CollectionManager.renameCollection(currentName, name.trim());
+        if (ok) onClose();
+    }, [name, currentName]);
+
+    return (
+        <ModalRoot {...modalProps}>
+            <form onSubmit={onSubmit}>
+                <ModalHeader><Forms.FormText>Rename Collection</Forms.FormText></ModalHeader>
+                <ModalContent>
+                    <Forms.FormTitle tag="h5" style={{ marginTop: "10px" }}>New Name</Forms.FormTitle>
+                    <TextInput value={name} onChange={(e: string) => setName(e)} />
+                </ModalContent>
+                <div style={{ marginTop: "1rem" }}>
+                    <ModalFooter>
+                        <Button type="submit" color={Button.Colors.GREEN} disabled={!name.trim().length} onClick={onSubmit}>Rename</Button>
                     </ModalFooter>
                 </div>
             </form>

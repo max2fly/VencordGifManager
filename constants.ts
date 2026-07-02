@@ -23,3 +23,7 @@ export const GIF_COLLECTION_PREFIX = "gc:";
 // Pseudo-category name for the trashcan: cached gifs that are no longer favorited and not
 // in any collection. Chosen to be unlikely to collide with a real search/collection name.
 export const TRASH_CATEGORY_NAME = "🗑 Trash";
+
+// Sentinel name of the reserved, pinned "Favorite Media" collection: arbitrary images/videos the
+// user favorited (Discord natively only favorites gifs). Reuses all collection machinery.
+export const MEDIA_FAVORITES_NAME = "📷 Favorite Media";

@@ -19,10 +19,11 @@
 import { DataStore } from "@api/index";
 import { Toasts } from "@webpack/common";
 
-import { GIF_COLLECTION_PREFIX } from "./constants";
+import { GIF_COLLECTION_PREFIX, MEDIA_FAVORITES_NAME } from "./constants";
 import * as GifLibrary from "./GifLibrary";
 import { settings } from "./index";
 import { Collection, Gif } from "./types";
+import { ensureOrder, isReservedName, renameInList, reorderCollectionsList, reorderGifInList } from "./utils/collectionOps";
 import { getFormat } from "./utils/getFormat";
 import { getGifKey } from "./utils/gifKey";
 
@@ -67,11 +68,17 @@ export const createCollection = async (name: string, gifs: Gif[]): Promise<void>
 
     // gifs shouldnt be empty because to create a collection you need to right click an image / gif and then create it yk. but cant hurt to have a null-conditional check RIGHT?
     const latestGifSrc = gifs[gifs.length - 1]?.src ?? settings.store.defaultEmptyCollectionImage;
+    // Assign an order strictly below the current minimum so this collection appears FIRST in the
+    // sorted tile row (sortedRegularCollections sorts ascending). This also prevents ensureOrder
+    // from treating the new collection as "missing an order" and triggering a full reindex.
+    const orders = collections.filter(c => !isReservedName(c.name)).map(c => c.order ?? 0);
+    const order = (orders.length ? Math.min(...orders) : 0) - 1;
     const collection = {
         name,
         src: latestGifSrc,
         format: getFormat(latestGifSrc),
         type: "Category",
+        order,
         gifs
     };
 
@@ -141,8 +148,33 @@ export const deleteCollection = async (name: string): Promise<void> => {
 };
 
 
-export const refreshCacheCollection = async (): Promise<void> => {
+export const reorderGif = async (collectionName: string, fromId: string, toId: string): Promise<void> => {
     const collections = await getCollections();
+    await DataStore.set(DATA_COLLECTION_NAME, reorderGifInList(collections, collectionName, fromId, toId));
+    return await refreshCacheCollection();
+};
+
+// Reorder the collection tiles: move `moveName` into `targetName`'s slot (by name, from the drag).
+export const reorderCollection = async (moveName: string, targetName: string): Promise<void> => {
+    const collections = await getCollections();
+    await DataStore.set(DATA_COLLECTION_NAME, reorderCollectionsList(collections, moveName, targetName));
+    return await refreshCacheCollection();
+};
+
+export const renameCollection = async (oldName: string, newName: string): Promise<boolean> => {
+    const collections = await getCollections();
+    const res = renameInList(collections, oldName, newName);
+    if (!res.ok) {
+        Toasts.show({ message: res.error ?? "Rename failed", type: Toasts.Type.FAILURE, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+        return false;
+    }
+    await DataStore.set(DATA_COLLECTION_NAME, res.collections);
+    await refreshCacheCollection();
+    return true;
+};
+
+export const refreshCacheCollection = async (): Promise<void> => {
+    let collections = await getCollections();
     // Migration: older versions stored collection names with a "gc:" prefix. We no
     // longer use a prefix (collections are matched by exact name), so strip it once.
     let changed = false;
@@ -152,6 +184,14 @@ export const refreshCacheCollection = async (): Promise<void> => {
             changed = true;
         }
     }
+    // One-time cleanup: the old custom "Favorite Media" pseudo-collection is retired (media is now
+    // favorited natively). Drop it if present; its cached files simply become trashcan orphans.
+    if (collections.some(c => c.name === MEDIA_FAVORITES_NAME)) {
+        collections = collections.filter(c => c.name !== MEDIA_FAVORITES_NAME);
+        changed = true;
+    }
+    const eo = ensureOrder(collections);
+    if (eo.changed) { collections = eo.collections; changed = true; }
     if (changed) await DataStore.set(DATA_COLLECTION_NAME, collections);
     cache_collections = collections;
 };

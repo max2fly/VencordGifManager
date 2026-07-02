@@ -23,6 +23,7 @@ export interface Category {
     name: string;
     src: string;
     format: Format;
+    order?: number;        // explicit tile order (regular collections only); assigned by migration
     gifs?: Gif[];
 }
 
