@@ -19,6 +19,7 @@
 import type { PluginNative } from "@utils/types";
 
 import { GifRecord } from "./types";
+import { getUrlExtension } from "./utils/getUrlExtension";
 import { hashKey } from "./utils/gifKey";
 
 const Native = VencordNative.pluginHelpers.GifManager as PluginNative<typeof import("./native")>;
@@ -75,7 +76,14 @@ export async function ensureCached(record: GifRecord, signedUrl: string): Promis
         console.warn(`[GifManager] cache fetch failed (status ${status})`, signedUrl.slice(0, 100));
         return null;
     }
-    const ext = extFromMime(mime);
+    let ext = extFromMime(mime);
+    if (ext === "bin") {
+        // Unrecognized content-type (e.g. octet-stream / .mov) — use the url's real extension so we
+        // never persist an unrenderable .bin. If that's unknown too, skip caching (stays retryable).
+        const urlExt = (getUrlExtension(record.url) ?? getUrlExtension(signedUrl) ?? "").toLowerCase();
+        if (urlExt in EXT_MIME) ext = urlExt;
+        else return null;
+    }
     await Native.saveGif(fileId, bytes, ext);
     return ext;
 }

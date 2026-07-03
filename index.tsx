@@ -35,7 +35,7 @@ import { cacheGif, healthCheck } from "./utils/favorites";
 import { getFormat } from "./utils/getFormat";
 import { getGif } from "./utils/getGif";
 import { classifyHost, getGifKey } from "./utils/gifKey";
-import { captureFavUpdater as captureFavUpdaterImpl, nativeFavorite, nativeFavoriteReal } from "./utils/nativeFavorites";
+import { captureFavUpdater as captureFavUpdaterImpl, nativeFavorite } from "./utils/nativeFavorites";
 import { onMessageCreate, recoverGif } from "./utils/reupload";
 import { deleteOrphan, getOrphans, isOrphan, purgeTrash, setFavoriteKeys, sweepLeakedFiles } from "./utils/trash";
 import { downloadCollections, uploadGifCollections } from "./utils/settingsUtils";
@@ -126,20 +126,7 @@ const addCollectionContextMenuPatch: NavContextMenuPatchCallback = (children, pr
             // if i do it the normal way i get a invalid context menu thingy error -> Menu API only allows Items and groups of Items as children.
             MenuThingy({ gif })
         );
-        group.push(
-            <Menu.MenuItem
-                id="gifmgr-favorite-media"
-                key="gifmgr-favorite-media"
-                label="Favorite Image/Video"
-                action={() => {
-                    const entry = { id: "", url: gif.url, src: gif.src, width: gif.width, height: gif.height, format: getFormat(gif.src) };
-                    // Prefer Discord's real favorite fn (correct entry + loadable src → shows in the
-                    // native Favorites tab); fall back to our proto reconstruction if not found.
-                    if (!nativeFavoriteReal(entry)) nativeFavorite(entry);
-                    void cacheGif(gif);
-                }}
-            />
-        );
+        // (Favoriting images/videos now lives on the hover ⭐ on the media itself — see mediaStar.ts.)
     }
 };
 
