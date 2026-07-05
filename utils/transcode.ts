@@ -18,18 +18,13 @@
 
 import { applyPalette, GIFEncoder, quantize } from "gifenc";
 
-// Caps to keep the output gif a sane size/CPU cost. Reupload is a rare recovery path,
-// so favour "renders inline as a gif" over pixel-perfect fidelity.
-const MAX_DIM = 400;       // longest side, px
-const TARGET_FPS = 15;
-const MAX_FRAMES = 150;    // ~10s at 15fps — safety cap for long clips
+import { OUTPUT_CAPS } from "../constants";
+import type { DecodedFrames } from "./frames";
 
-/**
- * Transcode a video blob (mp4/webm/…) into an animated GIF blob, by decoding frames
- * through a hidden <video> + canvas and encoding them with gifenc. Used only at reupload
- * time so a recovered video-backed gif renders inline (image) instead of as a video player.
- */
-export async function videoToGif(blob: Blob): Promise<Blob> {
+const { MAX_DIM, TARGET_FPS, MAX_FRAMES } = OUTPUT_CAPS;
+
+/** Decode a video blob into evenly-sampled frames (canvas per frame), capped for size/CPU. */
+export async function extractVideoFrames(blob: Blob): Promise<DecodedFrames> {
     const url = URL.createObjectURL(blob);
     const video = document.createElement("video");
     video.muted = true;
@@ -50,30 +45,47 @@ export async function videoToGif(blob: Blob): Promise<Blob> {
         const w = Math.max(1, Math.round(video.videoWidth * scale));
         const h = Math.max(1, Math.round(video.videoHeight * scale));
 
-        const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext("2d", { willReadFrequently: true });
-        if (!ctx) throw new Error("could not get 2d context");
+        const frameCount = Math.min(MAX_FRAMES, Math.max(1, Math.floor(duration * TARGET_FPS)));
+        const delay = Math.round(1000 / TARGET_FPS);
 
-        const frames = Math.min(MAX_FRAMES, Math.max(1, Math.floor(duration * TARGET_FPS)));
-        const delay = Math.round(1000 / TARGET_FPS); // ms (gifenc converts to centiseconds)
-        const gif = GIFEncoder();
-
-        for (let i = 0; i < frames; i++) {
-            await seek(video, (i / frames) * duration);
+        const frames: HTMLCanvasElement[] = [];
+        const delays: number[] = [];
+        for (let i = 0; i < frameCount; i++) {
+            await seek(video, (i / frameCount) * duration);
+            const canvas = document.createElement("canvas");
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext("2d", { willReadFrequently: true });
+            if (!ctx) throw new Error("could not get 2d context");
             ctx.drawImage(video, 0, 0, w, h);
-            const { data } = ctx.getImageData(0, 0, w, h);
-            const palette = quantize(data, 256);
-            const index = applyPalette(data, palette);
-            gif.writeFrame(index, w, h, { palette, delay });
+            frames.push(canvas);
+            delays.push(delay);
         }
-
-        gif.finish();
-        return new Blob([gif.bytes()], { type: "image/gif" });
+        return { frames, delays, w, h };
     } finally {
         URL.revokeObjectURL(url);
     }
+}
+
+/** Transcode a video blob into an animated GIF blob (used by recovery + quick-convert). */
+export async function videoToGif(blob: Blob): Promise<Blob> {
+    const { frames, delays, w, h } = await extractVideoFrames(blob);
+    return encodeGif(frames, delays, w, h);
+}
+
+/** Encode already-rendered canvas frames into a GIF blob. Shared by transcode + caption export. */
+export function encodeGif(frames: HTMLCanvasElement[], delays: number[], w: number, h: number): Blob {
+    const gif = GIFEncoder();
+    for (let i = 0; i < frames.length; i++) {
+        const ctx = frames[i].getContext("2d", { willReadFrequently: true });
+        if (!ctx) continue;
+        const { data } = ctx.getImageData(0, 0, w, h);
+        const palette = quantize(data, 256);
+        const index = applyPalette(data, palette);
+        gif.writeFrame(index, w, h, { palette, delay: delays[i] });
+    }
+    gif.finish();
+    return new Blob([gif.bytes()], { type: "image/gif" });
 }
 
 function seek(video: HTMLVideoElement, time: number): Promise<void> {

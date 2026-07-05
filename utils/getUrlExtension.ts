@@ -22,7 +22,11 @@ export function getUrlExtension(url: string) {
         if (url.startsWith("blob:")) return undefined;
         // tennor stuff is like //media.tenor/blah/blah
         if (!url.startsWith("https:")) url = "https:" + url;
-        return new URL(url).pathname.split(".").pop();
+        const path = new URL(url).pathname;
+        // no dot at all -> no extension. (`"...".split(".").pop()` would otherwise return the
+        // whole path, which callers could mistake for a real extension.)
+        const dot = path.lastIndexOf(".");
+        return dot === -1 ? undefined : path.slice(dot + 1);
     } catch {
         return undefined;
     }

@@ -43,6 +43,10 @@ import { uuidv4 } from "./utils/uuidv4";
 import { ensureDragStyle, removeDragStyle, startDragReorder } from "./utils/dragReorder";
 import { disableMediaStar, enableMediaStar, loadPersistedFavorites, syncFavoritedUrls } from "./utils/mediaStar";
 import { getItemFromNode } from "./utils/reactInternals";
+import { classifyMedia } from "./utils/formatClass";
+import { openCaptionEditor } from "./components/CaptionEditorModal";
+import { disableCaptionNavButton, enableCaptionNavButton } from "./utils/captionNavButton";
+import { convertAndStage, loadSource } from "./utils/mediaConvert";
 
 export const settings = definePluginSettings({
     gifPasteHint: {
@@ -61,6 +65,11 @@ export const settings = definePluginSettings({
         description: "The image / gif that will be shown when a collection has no images / gifs",
         type: OptionType.STRING,
         default: "https://i.imgur.com/TFatP8r.png"
+    },
+    showFormatOutlines: {
+        type: OptionType.BOOLEAN,
+        description: "Outline picker tiles by type: blue = video, green = image, none = gif",
+        default: true
     },
     importGifs: {
         type: OptionType.COMPONENT,
@@ -127,6 +136,36 @@ const addCollectionContextMenuPatch: NavContextMenuPatchCallback = (children, pr
             MenuThingy({ gif })
         );
         // (Favoriting images/videos now lives on the hover ⭐ on the media itself — see mediaStar.ts.)
+
+        // getGif already resolves image/video/gif embeds + attachments (audio excluded), so gif.url
+        // / gif.src is the message's media regardless of type. Caption works for any media; Convert
+        // shows for anything that isn't already a gif (video → animated gif, image → 1-frame gif).
+        group.push(
+            <Menu.MenuItem
+                id="gifmgr-add-caption"
+                key="gifmgr-add-caption"
+                label="Add Caption"
+                action={async () => {
+                    const src = await loadSource({ url: gif.url, src: gif.src });
+                    if (src) openCaptionEditor(src);
+                    else Toasts.show({ message: "Couldn't load this media", type: Toasts.Type.FAILURE, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+                }}
+            />
+        );
+        if (classifyMedia(gif.url) !== "gif") {
+            group.push(
+                <Menu.MenuItem
+                    id="gifmgr-convert-gif"
+                    key="gifmgr-convert-gif"
+                    label="Convert & Paste as GIF"
+                    action={async () => {
+                        const src = await loadSource({ url: gif.url, src: gif.src });
+                        if (src) await convertAndStage(src.blob, src.ext);
+                        else Toasts.show({ message: "Couldn't load this media", type: Toasts.Type.FAILURE, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+                    }}
+                />
+            );
+        }
     }
 };
 
@@ -152,6 +191,25 @@ function scheduleUpdate(instance: { forceUpdate?: () => void; }) {
     }, 120);
 }
 
+const OUTLINE_STYLE_ID = "gifmgr-fmt-style";
+function ensureOutlineStyle() {
+    if (document.getElementById(OUTLINE_STYLE_ID)) return;
+    const s = document.createElement("style");
+    s.id = OUTLINE_STYLE_ID;
+    // The outline is drawn as an ::after OVERLAY (not `outline`/`border`): the tile's media child
+    // forms its own stacking context and paints over an outline on the root — leaving only the
+    // rounded corners visible. A positioned ::after with a high z-index sits ABOVE the media, so the
+    // full border shows. inset:0 + border-radius:inherit matches the tile; pointer-events:none keeps
+    // clicks working. Attribute selectors (data-gifmgr-fmt injected at the reliable handleClick site).
+    s.textContent =
+        '[data-gifmgr-fmt="vid"],[data-gifmgr-fmt="img"]{position:relative}' +
+        '[data-gifmgr-fmt="vid"]::after,[data-gifmgr-fmt="img"]::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:3;box-sizing:border-box}' +
+        '[data-gifmgr-fmt="vid"]::after{border:3px solid #3b82f6}' +
+        '[data-gifmgr-fmt="img"]::after{border:3px solid #22c55e}';
+    document.head.appendChild(s);
+}
+function removeOutlineStyle() { document.getElementById(OUTLINE_STYLE_ID)?.remove(); }
+
 export default definePlugin({
     name: "GifManager",
     description: "Locally backs up favorited gifs and organizes them into collections",
@@ -169,10 +227,15 @@ export default definePlugin({
         },
         {
             find: "renderEmptyFavorite",
-            replacement: {
-                match: /render\(\){.{1,500}onClick:this\.handleClick,/,
-                replace: "$&onContextMenu: (e) => $self.collectionContextMenu(e, this),onMouseDown: (e) => $self.onItemMouseDown(e, this),"
-            }
+            replacement: [
+                {
+                    // Inject our handlers AND the format-outline data attribute at the same reliable
+                    // site (the tile root's props object). data-* forwards to the host DOM node and
+                    // never collides with Discord's own props — unlike guessing the minified className.
+                    match: /render\(\){.{1,500}onClick:this\.handleClick,/,
+                    replace: "$&onContextMenu: (e) => $self.collectionContextMenu(e, this),onMouseDown: (e) => $self.onItemMouseDown(e, this),\"data-gifmgr-fmt\": $self.formatClass(this.props.item),"
+                }
+            ]
         },
         {
             find: "renderHeaderContent()",
@@ -182,6 +245,9 @@ export default definePlugin({
                     match: /(renderContent\(\){)(.{1,50}resultItems)/,
                     replace: "$1$self.renderContent(this);$2"
                 },
+                // NOTE: the "Caption maker" button used to be spliced here (search-bar row).
+                // It now lives in the ExpressionPicker tab row via utils/captionNavButton.ts
+                // (DOM injection off the stable tablist), so no header patch is needed.
             ]
         },
         /*
@@ -229,8 +295,10 @@ export default definePlugin({
         GifLibrary.refreshLibrary();
         CollectionManager.refreshCacheCollection();
         ensureDragStyle();
+        ensureOutlineStyle();
         void loadPersistedFavorites();
         enableMediaStar();
+        enableCaptionNavButton();
 
         addContextMenuPatch("message", addCollectionContextMenuPatch);
     },
@@ -238,7 +306,9 @@ export default definePlugin({
     stop() {
         revokeAll();
         removeDragStyle();
+        removeOutlineStyle();
         disableMediaStar();
+        disableCaptionNavButton();
         removeContextMenuPatch("message", addCollectionContextMenuPatch);
     },
     flux: {
@@ -410,10 +480,45 @@ export default definePlugin({
     // Shared gif right-click actions (used for favorites AND collection gifs): add-to-collection,
     // recover/reupload from backup, and force-forget. Returns an array of Menu items (+ nulls,
     // which React ignores).
+    // Returns the format-outline CSS class for a picker tile (empty string = no outline).
+    // gif -> no outline; video -> blue; image -> green. Class names are prefixed so they
+    // match the injected stylesheet (ensureOutlineStyle) and don't collide with Discord's.
+    formatClass(item: any): "" | "img" | "vid" {
+        if (!settings.store.showFormatOutlines || !item?.url) return "";
+        const rec = GifLibrary.getRecord(getGifKey(item.url));
+        const cls = classifyMedia(item.url, rec?.localExt);
+        return cls === "gif" ? "" : cls; // gif = no outline; value goes in the data-gifmgr-fmt attribute
+    },
+
     gifActionItems(item: any) {
         const record = item?.url ? GifLibrary.getRecord(getGifKey(item.url)) : undefined;
         return [
             MenuThingy({ gif: { ...item, id: uuidv4() } }),
+            <Menu.MenuItem
+                key="add-caption"
+                id="add-caption"
+                label="Add Caption"
+                action={async () => {
+                    const src = await loadSource(item);
+                    if (src) openCaptionEditor(src);
+                    else Toasts.show({ message: "Couldn't load this media", type: Toasts.Type.FAILURE, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+                }}
+            />,
+            // Offer convert for anything that ISN'T already a gif — videos (→ animated gif) and
+            // static images (→ 1-frame gif). Classify directly (not this.formatClass, which is
+            // gated by the outline setting) so it stays available regardless of settings.
+            item?.url && classifyMedia(item.url, record?.localExt) !== "gif"
+                ? <Menu.MenuItem
+                    key="convert-gif"
+                    id="convert-gif"
+                    label="Convert & Paste as GIF"
+                    action={async () => {
+                        const src = await loadSource(item);
+                        if (src) await convertAndStage(src.blob, src.ext);
+                        else Toasts.show({ message: "Couldn't load this media", type: Toasts.Type.FAILURE, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+                    }}
+                />
+                : null,
             record?.localExt
                 ? <Menu.MenuItem
                     key="reupload-from-backup"

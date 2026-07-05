@@ -21,10 +21,12 @@ import { findByPropsLazy } from "@webpack";
 import { SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
 
 import * as CollectionManager from "../CollectionManager";
+import { EXT_MIME, VIDEO_EXTS } from "../constants";
 import * as GifLibrary from "../GifLibrary";
 import { dropObjectUrl } from "../gifCache";
 import { GifRecord } from "../types";
 import { classifyHost, getGifKey, hashKey } from "./gifKey";
+import { stageBlob } from "./mediaConvert";
 import { nativeRebaseFavorite } from "./nativeFavorites";
 import { videoToGif } from "./transcode";
 
@@ -34,16 +36,6 @@ import { videoToGif } from "./transcode";
 // UX rather than an instant send.
 const UploadAttachmentStore = findByPropsLazy("addFiles");
 const Native = VencordNative.pluginHelpers.GifManager as PluginNative<typeof import("../native")>;
-
-const DraftType_ChannelMessage = 0;
-const CloudUploadPlatform_WEB = 1;
-
-// Uploaded VIDEO attachments render as a video player; image-class render inline like a gif.
-const VIDEO_EXTS = ["mp4", "webm", "mov", "mkv", "avi"];
-const EXT_MIME: Record<string, string> = {
-    gif: "image/gif", mp4: "video/mp4", webm: "video/webm", avif: "image/avif",
-    png: "image/png", webp: "image/webp", jpg: "image/jpeg"
-};
 
 // Recoveries awaiting their send. Keyed by the gif's (old) library key. We match the eventual
 // sent attachment by exact byte size (anonymizer-proof — renaming can't change the size), then
@@ -112,12 +104,7 @@ export async function recoverGif(record: GifRecord): Promise<void> {
         });
     }
 
-    const file = new File([blob], filename, { type: blob.type });
-    UploadAttachmentStore.addFiles({
-        channelId,
-        draftType: DraftType_ChannelMessage,
-        files: [{ file, platform: CloudUploadPlatform_WEB }]
-    });
+    if (!stageBlob(blob, filename, channelId)) return;
     toast("Recovered from local backup — added to your message", Toasts.Type.SUCCESS);
 }
 
