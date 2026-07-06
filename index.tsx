@@ -434,14 +434,18 @@ export default definePlugin({
             }
 
             // Append the trashcan (cached gifs no longer favorited / in a collection), if any.
+            // Also append it when there are NO collections at all — even with an empty trash:
+            // Discord's category grid gates off (and drops the native Favorites tile with it)
+            // when trendingCategories is empty, so we always keep at least one tile so Favorites
+            // still renders for a fresh / collection-less user.
             const orphans = getOrphans();
-            if (orphans.length) {
+            if (orphans.length || cats.length === 0) {
                 const coverRec = orphans[orphans.length - 1];
                 cats.push({
                     type: "Category",
                     name: TRASH_CATEGORY_NAME,
-                    src: getObjectUrlSync(coverRec.key) ?? settings.store.defaultEmptyCollectionImage,
-                    format: coverRec.format,
+                    src: (coverRec && getObjectUrlSync(coverRec.key)) || settings.store.defaultEmptyCollectionImage,
+                    format: coverRec?.format,
                     gifs: []
                 });
             }
