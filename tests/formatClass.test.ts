@@ -18,7 +18,56 @@
 
 import assert from "node:assert/strict";
 
+import { Format } from "../types";
 import { classifyMedia } from "../utils/formatClass";
+import { getFormat } from "../utils/getFormat";
+import { getUrlExtension } from "../utils/getUrlExtension";
+import { unwrapChain } from "../utils/unwrapUrl";
+
+// --- wrapped / proxied urls: the real media hides behind a converter host or Discord's proxy ---
+const VX_GIF = "https://gifconvert.vxtwitter.com/convert.avif?url=https://video.twimg.com/tweet_video/HNC0qCWXEAAizM4.mp4";
+const PROXIED_VID = "https://images-ext-1.discordapp.net/external/am05Enkqg5TWw9a-LEqa3-DvwczLmKOVwc2lIZkXaHw/%3Furl%3Dhttps%253A%252F%252Fvideo.twimg.com%252Famplify_video%252F2074738098697814016%252Fvid%252Favc1%252F720x1280%252FyyWzsF8w2ZfdLT-L.mp4%253Ftag%253D28/https/api.fxtwitter.com/2/go";
+
+// vxtwitter's gif converter renders inline animated -> gif (no outline), NOT a static image
+assert.equal(classifyMedia(VX_GIF), "gif");
+// Discord proxy wrapping fxtwitter -> the twitter mp4 -> video (blue), NOT a static image
+assert.equal(classifyMedia(PROXIED_VID), "vid");
+
+// twitter serves size variants as a `:name` suffix AFTER the extension, and also as a `?format=`
+// query. Both must still resolve to "jpg" — a null extension makes getFormat() render an <img> as
+// a <video>, which shows nothing.
+assert.equal(getUrlExtension("https://pbs.twimg.com/media/HMn0Ui3XoAA5yeo.jpg:large"), "jpg");
+assert.equal(getUrlExtension("https://pbs.twimg.com/media/HMn0Ui3XoAA5yeo.png:orig"), "png");
+assert.equal(getUrlExtension("https://pbs.twimg.com/media/HMn0Ui3XoAA5yeo?format=jpg&name=small"), "jpg");
+assert.equal(getFormat("https://pbs.twimg.com/media/HMn0Ui3XoAA5yeo.jpg:large"), Format.IMAGE);
+assert.equal(getFormat("https://pbs.twimg.com/media/HMn0Ui3XoAA5yeo?format=jpg&name=small"), Format.IMAGE);
+assert.equal(getFormat("https://cdn.discordapp.com/attachments/1/2/clip.mp4"), Format.VIDEO);
+assert.equal(classifyMedia("https://pbs.twimg.com/media/HMn0Ui3XoAA5yeo.jpg:large"), "img");
+
+// --- category tiles: a blob: src has no extension, so the cached file's ext is the only signal.
+// Guessing VIDEO here renders image bytes into a <video> -> a black tile. ---
+assert.equal(getFormat("blob:https://discord.com/abc-123", "jpg"), Format.IMAGE);
+assert.equal(getFormat("blob:https://discord.com/abc-123", "avif"), Format.IMAGE);
+assert.equal(getFormat("blob:https://discord.com/abc-123", "mp4"), Format.VIDEO);
+// the durable url wins when it carries a container; localExt only fills the gap
+assert.equal(getFormat(VX_GIF, "avif"), Format.IMAGE);
+assert.equal(getFormat(PROXIED_VID, "mp4"), Format.VIDEO);
+// an extension-less tenor url is still a video (the legacy default must survive)
+assert.equal(getFormat("https://media.tenor.com/abc/subaru"), Format.VIDEO);
+
+// the extension parser must only read the LAST path segment: Discord's proxy embeds the origin
+// host in the path, and a whole-path scan grabbed the dot in "api.fxtwitter.com" -> "com/2/go"
+assert.equal(getUrlExtension(PROXIED_VID), undefined);
+assert.equal(getUrlExtension("https://cdn.discordapp.com/attachments/1/2/my.file.name.mp4"), "mp4");
+assert.equal(getUrlExtension("https://example.com/v1.2/download"), undefined);
+
+// unwrapping peels the proxy, then the ?url= param, down to the real file
+assert.deepEqual(unwrapChain(PROXIED_VID), [
+    PROXIED_VID,
+    "https://api.fxtwitter.com/2/go?url=https%3A%2F%2Fvideo.twimg.com%2Famplify_video%2F2074738098697814016%2Fvid%2Favc1%2F720x1280%2FyyWzsF8w2ZfdLT-L.mp4%3Ftag%3D28",
+    "https://video.twimg.com/amplify_video/2074738098697814016/vid/avc1/720x1280/yyWzsF8w2ZfdLT-L.mp4?tag=28"
+]);
+assert.deepEqual(unwrapChain("https://cdn.discordapp.com/attachments/1/2/clip.mp4"), ["https://cdn.discordapp.com/attachments/1/2/clip.mp4"]);
 
 // --- the exact cases the user reported wrong, now asserted correct ---
 // real video file on Discord CDN -> video (blue), NOT gif
