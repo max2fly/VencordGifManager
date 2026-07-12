@@ -19,28 +19,8 @@
 import { VIDEO_EXTS } from "../constants";
 import { Format } from "../types";
 import { getUrlExtension } from "./getUrlExtension";
-import { unwrapChain } from "./unwrapUrl";
 
-/**
- * Which ELEMENT Discord renders this media into: Format.VIDEO -> <video>, Format.IMAGE -> <img>.
- * Getting it wrong renders a black box (image bytes in a <video>) or a broken tile (video in an <img>),
- * so read the container from every layer available before falling back to the video-shaped default:
- *   - media.tenor "gifs" are really mp4s                                   -> VIDEO by host
- *   - wrapper urls (Discord's proxy, ?url= converters) hide the real file  -> peel them
- *   - `localExt` is the extension of the CACHED file, and the only signal a blob: src ever has
- * NEVER derive this from a stored value: it is computed from the url and must be recomputed on
- * render, or a parser fix can't reach media that was saved before it.
- */
-export function getFormat(url: string, localExt?: string | null): Format {
-    if (url.startsWith("https://media.tenor")) return Format.VIDEO;
-
-    for (const candidate of unwrapChain(url)) {
-        const ext = getUrlExtension(candidate)?.toLowerCase();
-        if (ext) return VIDEO_EXTS.includes(ext) ? Format.VIDEO : Format.IMAGE;
-    }
-
-    const ext = (localExt ?? "").toLowerCase();
-    if (ext) return VIDEO_EXTS.includes(ext) ? Format.VIDEO : Format.IMAGE;
-
-    return Format.VIDEO; // no signal anywhere: assume video, as an extension-less tenor url would be
+export function getFormat(url: string) {
+    const extension = getUrlExtension(url);
+    return url.startsWith("https://media.tenor") || extension == null || VIDEO_EXTS.includes(extension) ? Format.VIDEO : Format.IMAGE;
 }

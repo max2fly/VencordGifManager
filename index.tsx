@@ -388,8 +388,7 @@ export default definePlugin({
                     getObjectUrl(r).then(url => { if (url) scheduleUpdate(instance); });
                     return null; // not hydrated yet — skip until the local blob is ready
                 }
-                // src is always a blob: here, so the cached file's extension is the only format signal.
-                return { id: r.key, format: getFormat(r.url, r.localExt), src: local, url: r.url, width: r.width, height: r.height };
+                return { id: r.key, format: r.format, src: local, url: r.url, width: r.width, height: r.height };
             }).filter(Boolean).reverse();
             return;
         }
@@ -405,9 +404,7 @@ export default definePlugin({
                 if (!local) cacheGif(g).then(newly => { if (newly) scheduleUpdate(instance); });
                 return {
                     id: g.id,
-                    // A blob: src carries no extension, so hand getFormat the durable url + the
-                    // cached file's real extension. Never reuse a stored format (it's stale).
-                    format: getFormat(g.url, GifLibrary.getRecord(key)?.localExt),
+                    format: getFormat(g.src),
                     src: local ?? g.src,
                     url: g.url,
                     width: g.width,
@@ -426,24 +423,14 @@ export default definePlugin({
             const cats: any[] = [];
 
             // Regular collections, in explicit `order`.
-            // The stored `c.format` is stale by construction — it was derived from the url by whatever
-            // parser existed when the gif was added — so recompute it from the src we actually render,
-            // or the tile renders image bytes inside a <video> and shows up black.
             for (const c of sortedRegularCollections(this.collections)) {
                 const cover = c.gifs[c.gifs.length - 1];
-                if (!cover) { cats.push({ ...c, format: getFormat(c.src) }); continue; }
+                if (!cover) { cats.push(c); continue; }
                 const key = getGifKey(cover.url);
                 const local = getObjectUrlSync(key);
                 if (!local) cacheGif(cover).then(newly => { if (newly) scheduleUpdate(instance); });
                 const fallback = classifyHost(cover.url) === "cdn" ? settings.store.defaultEmptyCollectionImage : c.src;
-                const src = local ?? fallback;
-                cats.push({
-                    ...c,
-                    src,
-                    // Only the local blob shows the COVER; any fallback is a different url (the
-                    // placeholder image or the durable src), so classify whichever one we emit.
-                    format: local ? getFormat(cover.url, GifLibrary.getRecord(key)?.localExt) : getFormat(src)
-                });
+                cats.push({ ...c, src: local ?? fallback });
             }
 
             // Append the trashcan (cached gifs no longer favorited / in a collection), if any.
@@ -454,14 +441,11 @@ export default definePlugin({
             const orphans = getOrphans();
             if (orphans.length || cats.length === 0) {
                 const coverRec = orphans[orphans.length - 1];
-                const coverBlob = coverRec && getObjectUrlSync(coverRec.key);
                 cats.push({
                     type: "Category",
                     name: TRASH_CATEGORY_NAME,
-                    src: coverBlob || settings.store.defaultEmptyCollectionImage,
-                    format: coverBlob
-                        ? getFormat(coverRec.url, coverRec.localExt)
-                        : getFormat(settings.store.defaultEmptyCollectionImage),
+                    src: (coverRec && getObjectUrlSync(coverRec.key)) || settings.store.defaultEmptyCollectionImage,
+                    format: coverRec?.format,
                     gifs: []
                 });
             }

@@ -18,33 +18,34 @@
 
 import type { PluginNative } from "@utils/types";
 
-import { EXT_MIME } from "./constants";
 import { GifRecord } from "./types";
 import { getUrlExtension } from "./utils/getUrlExtension";
 import { hashKey } from "./utils/gifKey";
-import { sniffExt } from "./utils/sniff";
 
 const Native = VencordNative.pluginHelpers.GifManager as PluginNative<typeof import("./native")>;
 
 const objectUrls = new Map<string, string>(); // key -> blob: url
 
-/** Content-type -> extension. Null when the header is unhelpful (octet-stream, html, …). */
-function extFromMime(mime: string): string | null {
+const EXT_MIME: Record<string, string> = {
+    gif: "image/gif",
+    mp4: "video/mp4",
+    webm: "video/webm",
+    avif: "image/avif",
+    png: "image/png",
+    webp: "image/webp",
+    jpg: "image/jpeg"
+};
+
+function extFromMime(mime: string): string {
     if (mime.includes("gif")) return "gif";
-    if (mime.includes("quicktime")) return "mov"; // .mov ships as video/quicktime, matching no other token
     if (mime.includes("mp4")) return "mp4";
     if (mime.includes("webm")) return "webm";
     if (mime.includes("avif")) return "avif";
     if (mime.includes("png")) return "png";
     if (mime.includes("webp")) return "webp";
     if (mime.includes("jpeg") || mime.includes("jpg")) return "jpg";
-    return null;
+    return "bin";
 }
-
-// Chromium's <video> won't commit to video/quicktime, but a .mov IS ISO-BMFF — the same container
-// family as mp4 — so it decodes fine when labelled as one. Only the Blob's label is adjusted; the
-// bytes and the on-disk .mov extension are untouched.
-const BLOB_MIME: Record<string, string> = { ...EXT_MIME, mov: "video/mp4" };
 
 export async function ensureCached(record: GifRecord, signedUrl: string): Promise<string | null> {
     const fileId = hashKey(record.key);
@@ -75,19 +76,14 @@ export async function ensureCached(record: GifRecord, signedUrl: string): Promis
         console.warn(`[GifManager] cache fetch failed (status ${status})`, signedUrl.slice(0, 100));
         return null;
     }
-    // Unhelpful content-type (octet-stream, an api redirect's text/html, …): the BYTES are
-    // authoritative, so sniff their magic number before falling back to guessing from the url.
-    const ext = extFromMime(mime)
-        ?? sniffExt(bytes)
-        ?? (getUrlExtension(record.url) ?? getUrlExtension(signedUrl) ?? "").toLowerCase();
-
-    // Never persist a file we can't name — an unrenderable blob is worse than no cache, and
-    // skipping leaves the item retryable on the next pass.
-    if (!(ext in EXT_MIME)) {
-        console.warn(`[GifManager] uncacheable media (mime "${mime}", ext "${ext}")`, signedUrl.slice(0, 100));
-        return null;
+    let ext = extFromMime(mime);
+    if (ext === "bin") {
+        // Unrecognized content-type (e.g. octet-stream / .mov) — use the url's real extension so we
+        // never persist an unrenderable .bin. If that's unknown too, skip caching (stays retryable).
+        const urlExt = (getUrlExtension(record.url) ?? getUrlExtension(signedUrl) ?? "").toLowerCase();
+        if (urlExt in EXT_MIME) ext = urlExt;
+        else return null;
     }
-
     await Native.saveGif(fileId, bytes, ext);
     return ext;
 }
@@ -97,7 +93,7 @@ export async function getObjectUrl(record: GifRecord): Promise<string | null> {
     if (!record.localExt) return null;
     const bytes = await Native.readGif(hashKey(record.key), record.localExt);
     if (!bytes) return null;
-    const url = URL.createObjectURL(new Blob([bytes], { type: BLOB_MIME[record.localExt] ?? "" }));
+    const url = URL.createObjectURL(new Blob([bytes], { type: EXT_MIME[record.localExt] ?? "" }));
     objectUrls.set(record.key, url);
     return url;
 }
