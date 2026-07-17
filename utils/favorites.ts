@@ -19,7 +19,7 @@
 import * as GifLibrary from "../GifLibrary";
 import { ensureCached, fetchOutcome, getObjectUrl, getObjectUrlSync } from "../gifCache";
 import { Gif } from "../types";
-import { classifyFetchResult } from "./health";
+import { classifyFetchResult, GifHost } from "./health";
 import { getGifKey } from "./gifKey";
 
 // A tiny concurrency-limited runner. Used for two distinct workloads so a large
@@ -57,24 +57,47 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const runHealth = makeRunner(3);
 const checking = new Set<string>();
 
+// Fresh signed CDN urls captured at render time, keyed by gif key. Our render swaps a cached
+// favorite's `src` to a local blob:, so by click time the clicked object no longer carries
+// Discord's signed url and our stored record url is the bare (always-404) one. Stash the fresh
+// signed url here so the send-time probe has a live url to check.
+const freshSignedUrls = new Map<string, string>();
+
+export function rememberFreshUrl(key: string, url: string | undefined): void {
+    if (url && !url.startsWith("blob:")) freshSignedUrls.set(key, url);
+}
+
 /**
- * Opportunistic 24h health check for a Discord-CDN gif, using the FRESH signed url Discord
- * provides at render time (our stored url's signature has long expired). Marks the record
- * "gone" on a confirmed delete (404 NoSuchKey) and back to "ok" if it reappears. Tenor /
- * external hosts are skipped (their urls don't expire the same way). Fire-and-forget.
+ * Send-time existence probe for a CDN gif, reusing the fresh signed url captured at render.
+ * Returns the raw verdict; callers decide what to do with it. Never throws (transient on error).
+ */
+export async function probeFreshUrl(key: string, fallbackUrl: string, host: GifHost): Promise<"ok" | "unavailable" | "transient"> {
+    const url = freshSignedUrls.get(key) ?? fallbackUrl;
+    try {
+        return classifyFetchResult(await fetchOutcome(url), host);
+    } catch {
+        return "transient";
+    }
+}
+
+/**
+ * Opportunistic 24h health check for a saved gif, using the FRESH url Discord provides at render
+ * time (our stored url's signature, if any, has long expired). Marks the record "gone" when the
+ * source is unavailable (any HTTP error — deleted attachment, dead external host, 500, …) and back
+ * to "ok" if it serves again. Host-agnostic: any host can go down. Fire-and-forget.
  */
 export function healthCheck(gif: Gif): void {
     if (!gif?.url) return;
     const key = getGifKey(gif.url);
     const rec = GifLibrary.getRecord(key);
-    if (!rec || rec.host !== "cdn") return;
+    if (!rec) return;
     if (Date.now() - rec.lastCheckedAt < DAY_MS) return;
     if (checking.has(key)) return;
     checking.add(key);
     runHealth(async () => {
         try {
-            const verdict = classifyFetchResult(await fetchOutcome(gif.src || gif.url));
-            if (verdict === "gone") await GifLibrary.setStatus(key, "gone");
+            const verdict = classifyFetchResult(await fetchOutcome(gif.src || gif.url), rec.host);
+            if (verdict === "unavailable") await GifLibrary.setStatus(key, "gone");
             else if (verdict === "ok" && rec.status === "gone") await GifLibrary.setStatus(key, "ok");
             if (verdict !== "transient") await GifLibrary.touchChecked(key);
         } catch {

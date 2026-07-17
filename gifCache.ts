@@ -22,11 +22,21 @@ import { EXT_MIME } from "./constants";
 import { GifRecord } from "./types";
 import { getUrlExtension } from "./utils/getUrlExtension";
 import { hashKey } from "./utils/gifKey";
-import { sniffExt } from "./utils/sniff";
+import { isAnimated, sniffExt } from "./utils/sniff";
 
 const Native = VencordNative.pluginHelpers.GifManager as PluginNative<typeof import("./native")>;
 
 const objectUrls = new Map<string, string>(); // key -> blob: url
+
+// key -> is the cached file an ANIMATED image container (animated webp/avif)? Derived from the
+// bytes we already read on cache/render, so `.webp` (extension-ambiguous) isn't mis-outlined as a
+// static image after a recovery reupload. Session-only + self-healing — no schema/migration.
+const animatedByKey = new Map<string, boolean>();
+
+/** True if the cached file for `key` is a known animated image container. Undefined key → false. */
+export function isAnimatedSync(key: string): boolean {
+    return animatedByKey.get(key) === true;
+}
 
 /** Content-type -> extension. Null when the header is unhelpful (octet-stream, html, …). */
 function extFromMime(mime: string): string | null {
@@ -88,6 +98,7 @@ export async function ensureCached(record: GifRecord, signedUrl: string): Promis
         return null;
     }
 
+    animatedByKey.set(record.key, isAnimated(bytes));
     await Native.saveGif(fileId, bytes, ext);
     return ext;
 }
@@ -97,6 +108,7 @@ export async function getObjectUrl(record: GifRecord): Promise<string | null> {
     if (!record.localExt) return null;
     const bytes = await Native.readGif(hashKey(record.key), record.localExt);
     if (!bytes) return null;
+    animatedByKey.set(record.key, isAnimated(bytes)); // backfill for files cached in a prior session
     const url = URL.createObjectURL(new Blob([bytes], { type: BLOB_MIME[record.localExt] ?? "" }));
     objectUrls.set(record.key, url);
     return url;

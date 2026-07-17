@@ -29,9 +29,9 @@ import * as CollectionManager from "./CollectionManager";
 import { GIF_ITEM_PREFIX, TRASH_CATEGORY_NAME } from "./constants";
 import { isReservedName, regularCollectionKeys, sortedRegularCollections } from "./utils/collectionOps";
 import * as GifLibrary from "./GifLibrary";
-import { getObjectUrl, getObjectUrlSync, revokeAll } from "./gifCache";
+import { getObjectUrl, getObjectUrlSync, isAnimatedSync, revokeAll } from "./gifCache";
 import { Collection, Gif, GifRecord, Props } from "./types";
-import { cacheGif, healthCheck } from "./utils/favorites";
+import { cacheGif, healthCheck, probeFreshUrl, rememberFreshUrl } from "./utils/favorites";
 import { getFormat } from "./utils/getFormat";
 import { getGif } from "./utils/getGif";
 import { classifyHost, getGifKey } from "./utils/gifKey";
@@ -47,6 +47,16 @@ import { classifyMedia } from "./utils/formatClass";
 import { openCaptionEditor } from "./components/CaptionEditorModal";
 import { disableCaptionNavButton, enableCaptionNavButton } from "./utils/captionNavButton";
 import { convertAndStage, loadSource } from "./utils/mediaConvert";
+
+// Send-time CDN probe: how recently a health check must have run for us to trust it and skip
+// the probe. Older than this and a click re-verifies the CDN before letting the link out.
+const SEND_PROBE_STALE_MS = 5 * 60 * 1000;
+// Gifs we've probed and are re-dispatching through handleSelectGIF: the guard lets these
+// straight through on the second pass so the real send runs (no infinite probe loop).
+const probedGifs = new WeakSet<object>();
+// Gif keys with a send-time probe currently in flight — blocks duplicate probes / double-sends
+// from rapid re-clicks during the ~200ms verification.
+const sendProbing = new Set<string>();
 
 export const settings = definePluginSettings({
     gifPasteHint: {
@@ -265,15 +275,16 @@ export default definePlugin({
                     "$1if($self.shouldStopFetch(arguments[0])) return;$2"
             }
         },
-        // Clicking a gif whose remote source is gone should recover from the local backup
-        // instead of sending a dead link. This guard runs before the default send / GifPaste's
-        // paste (userplugin patches apply after built-ins), and only fires for broken gifs —
-        // everything else falls through untouched.
+        // Clicking a saved gif verifies the CDN copy still exists before the link goes out; if
+        // it's gone (and we have a local backup) we recover from disk instead of sending a dead
+        // link. This guard runs before the default send / GifPaste's paste (userplugin patches
+        // apply after built-ins). `this` is the picker component instance — passed so an async
+        // probe can re-dispatch the real send once the gif is confirmed alive.
         {
             find: "handleSelectGIF=",
             replacement: {
                 match: /handleSelectGIF=(\i)=>\{/,
-                replace: "$&if($self.handleBrokenSelect($1))return;"
+                replace: "$&if($self.handleSelectGif($1,this))return;"
             }
         },
         // Capture Discord's favorite-gifs proto updater (the thing the ⭐ button drives) so we
@@ -365,6 +376,9 @@ export default definePlugin({
                 // which stay native favorites — using the fresh signed url Discord gives us here.
                 cacheGif(fav).then(newly => { if (newly) scheduleUpdate(instance); });
                 healthCheck(fav);
+                // Stash the fresh signed url so the send-time probe has a live url to check
+                // (our tile swap below replaces src with a local blob:). Prefer the signed src.
+                rememberFreshUrl(key, fav.src && !fav.src.startsWith("blob:") ? fav.src : fav.url);
 
                 if (inCol.has(key)) continue;            // hidden from the grid (lives in a collection)
 
@@ -477,16 +491,64 @@ export default definePlugin({
         return query === TRASH_CATEGORY_NAME || (query != null && this.collections.some(c => c.name === query));
     },
 
-    // Returns true (and starts recovery) when the clicked gif's remote source is confirmed gone
-    // but we have a local backup — so the click reuploads from disk instead of sending a dead link.
-    handleBrokenSelect(gif: { url?: string; }) {
+    // Runs at the top of Discord's handleSelectGIF, before the default send / GifPaste's paste.
+    // Returns true to BLOCK that send when we want to handle the gif ourselves (recover from a
+    // dead CDN link, or hold it while we verify the CDN). Returns false to let the send proceed.
+    handleSelectGif(gif: { url?: string; src?: string; }, instance: any) {
         if (!gif?.url) return false;
-        const rec = GifLibrary.getRecord(getGifKey(gif.url));
-        if (rec?.status === "gone" && rec.localExt) {
-            void recoverGif(rec);
-            return true;
+        // Second pass of a re-dispatch: we already probed this exact gif object and it was alive,
+        // so let it straight through to the real send.
+        if (probedGifs.has(gif)) { probedGifs.delete(gif); return false; }
+
+        const key = getGifKey(gif.url);
+        const rec = GifLibrary.getRecord(key);
+        // Only gifs we could actually recover to matter: any host with a local backup. (Any host
+        // can go down — Discord CDN, fxtwitter, Tenor.) Un-backed-up gifs have no fallback, so
+        // they take the normal instant path untouched.
+        if (!rec || !rec.localExt) return false;
+
+        // Already known gone → recover immediately, no probe needed.
+        if (rec.status === "gone") { void recoverGif(rec); return true; }
+
+        // Trust a recent health check; only pay the network probe when the status is stale.
+        if (Date.now() - rec.lastCheckedAt < SEND_PROBE_STALE_MS) return false;
+
+        // Already verifying this gif (e.g. a second click during the ~200ms probe) — just keep
+        // blocking so we don't fire a duplicate probe / double-send.
+        if (sendProbing.has(key)) return true;
+
+        // Stale: hold the send, verify the CDN, then either recover (gone) or re-dispatch (alive).
+        sendProbing.add(key);
+        void this.verifyThenSend(gif, key, rec, instance);
+        return true;
+    },
+
+    // Async tail of handleSelectGif for a stale gif: probe the CDN and act on the verdict.
+    // Only a confirmed delete (404 NoSuchKey) recovers from backup; expired/transient/ok all
+    // send the link (transient is likely our own connectivity — don't punish the user).
+    async verifyThenSend(gif: { url?: string; }, key: string, rec: GifRecord, instance: any) {
+        try {
+            const verdict = await probeFreshUrl(key, gif.url!, rec.host);
+            if (verdict === "unavailable") {
+                GifLibrary.setStatus(key, "gone");   // mutates the live record → rec.status is now "gone"
+                void recoverGif(rec);
+                return;
+            }
+            // Alive (2xx) or unverifiable (our own network): refresh health, then run the real send.
+            GifLibrary.touchChecked(key);
+            // Re-dispatch through the picker's own handler so both Discord's default send and
+            // GifPaste's paste stay intact. Fall back to a backup send if the handler isn't reachable
+            // (never drop the user's click — worst case it goes out as an attachment from disk).
+            if (typeof instance?.handleSelectGIF === "function") {
+                probedGifs.add(gif);
+                instance.handleSelectGIF(gif);
+            } else {
+                console.error("[GifManager] can't re-dispatch send; falling back to backup");
+                void recoverGif(rec);
+            }
+        } finally {
+            sendProbing.delete(key);
         }
-        return false;
     },
 
     // Right-click toggle: manually mark a gif's CDN source as gone (forces recover-on-click)
@@ -505,8 +567,11 @@ export default definePlugin({
     // match the injected stylesheet (ensureOutlineStyle) and don't collide with Discord's.
     formatClass(item: any): "" | "img" | "vid" {
         if (!settings.store.showFormatOutlines || !item?.url) return "";
-        const rec = GifLibrary.getRecord(getGifKey(item.url));
-        const cls = classifyMedia(item.url, rec?.localExt);
+        const key = getGifKey(item.url);
+        const cls = classifyMedia(item.url, GifLibrary.getRecord(key)?.localExt);
+        // An animated webp/avif renders inline animated just like a gif, but its extension reads as
+        // a still image — so honour the byte-sniffed animation flag and drop the static outline.
+        if (cls === "img" && isAnimatedSync(key)) return "";
         return cls === "gif" ? "" : cls; // gif = no outline; value goes in the data-gifmgr-fmt attribute
     },
 
