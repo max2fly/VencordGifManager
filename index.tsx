@@ -242,8 +242,17 @@ export default definePlugin({
                     // Inject our handlers AND the format-outline data attribute at the same reliable
                     // site (the tile root's props object). data-* forwards to the host DOM node and
                     // never collides with Discord's own props — unlike guessing the minified className.
-                    match: /render\(\){.{1,500}onClick:this\.handleClick,/,
-                    replace: "$&onContextMenu: (e) => $self.collectionContextMenu(e, this),onMouseDown: (e) => $self.onItemMouseDown(e, this),\"data-gifmgr-fmt\": $self.formatClass(this.props.item),"
+                    //
+                    // Discord (mid-2026 update) added its OWN `onContextMenu:this.handleContextMenu`
+                    // to this same object literal, immediately after `onClick:this.handleClick,`. Since
+                    // duplicate object keys resolve to the LAST definition, Discord's handler silently
+                    // overrode ours and killed the right-click menu (while onMouseDown/data-gifmgr-fmt,
+                    // which have no Discord twin, kept working). We consume Discord's onContextMenu (if
+                    // present) and re-emit it BEFORE ours, so ours wins. The group is optional so the
+                    // patch still applies on builds that lack it — a hard requirement would otherwise
+                    // take down the outlines and drag-reorder along with the menu.
+                    match: /(render\(\){.{1,500}onClick:this\.handleClick,)(onContextMenu:this\.\i,)?/,
+                    replace: "$1$2onContextMenu: (e) => $self.collectionContextMenu(e, this),onMouseDown: (e) => $self.onItemMouseDown(e, this),\"data-gifmgr-fmt\": $self.formatClass(this.props.item),"
                 }
             ]
         },
