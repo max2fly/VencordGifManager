@@ -18,7 +18,7 @@
 
 import type { PluginNative } from "@utils/types";
 import { findByPropsLazy } from "@webpack";
-import { SelectedChannelStore, Toasts } from "@webpack/common";
+import { SelectedChannelStore, showToast } from "@webpack/common";
 
 import { CLOUD_UPLOAD_PLATFORM_WEB, DRAFT_TYPE_CHANNEL_MESSAGE, EXT_MIME } from "../constants";
 import * as GifLibrary from "../GifLibrary";
@@ -31,8 +31,8 @@ import { encodeGif } from "./transcode";
 const UploadAttachmentStore = findByPropsLazy("addFiles");
 const Native = VencordNative.pluginHelpers.GifManager as PluginNative<typeof import("../native")>;
 
-function toast(message: string, type: number) {
-    Toasts.show({ message, type, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+function toast(message: string, variant: "default" | "success" | "critical" = "default") {
+    showToast({ text: message, variant, duration: 3000, position: "bottom" });
 }
 
 /**
@@ -43,8 +43,8 @@ function toast(message: string, type: number) {
  */
 export function stageBlob(blob: Blob, filename: string, channelId?: string): boolean {
     const cid = channelId ?? SelectedChannelStore.getChannelId();
-    if (!cid) { toast("Open a channel first", Toasts.Type.FAILURE); return false; }
-    if (!UploadAttachmentStore?.addFiles) { toast("Upload module not ready — try again", Toasts.Type.FAILURE); return false; }
+    if (!cid) { toast("Open a channel first", "critical"); return false; }
+    if (!UploadAttachmentStore?.addFiles) { toast("Upload module not ready — try again", "critical"); return false; }
     const file = new File([blob], filename, { type: blob.type });
     UploadAttachmentStore.addFiles({
         channelId: cid,
@@ -60,14 +60,14 @@ export function stageBlob(blob: Blob, filename: string, channelId?: string): boo
  * this image as a gif" action. (Gifs never reach here; the menu hides Convert for them.)
  */
 export async function convertAndStage(blob: Blob, ext: string): Promise<void> {
-    toast("Converting to gif…", Toasts.Type.MESSAGE);
+    toast("Converting to gif…", "default");
     try {
         const { frames, delays, w, h } = await decodeFrames(blob, ext);
         const gif = encodeGif(frames, delays, w, h);
-        if (stageBlob(gif, "converted.gif")) toast("Added to your message", Toasts.Type.SUCCESS);
+        if (stageBlob(gif, "converted.gif")) toast("Added to your message", "success");
     } catch (e) {
         console.error("[GifManager] convert to gif failed", e);
-        toast("Couldn't convert to gif", Toasts.Type.FAILURE);
+        toast("Couldn't convert to gif", "critical");
     }
 }
 

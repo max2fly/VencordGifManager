@@ -17,7 +17,7 @@
 */
 
 import { DataStore } from "@api/index";
-import { Toasts } from "@webpack/common";
+import { showToast } from "@webpack/common";
 
 import { GIF_COLLECTION_PREFIX, MEDIA_FAVORITES_NAME } from "./constants";
 import * as GifLibrary from "./GifLibrary";
@@ -56,14 +56,11 @@ export const createCollection = async (name: string, gifs: Gif[]): Promise<void>
     const collections = await getCollections();
     const duplicateCollection = collections.find(c => c.name === name);
     if (duplicateCollection)
-        return Toasts.show({
-            message: "That collection already exists",
-            type: Toasts.Type.FAILURE,
-            id: Toasts.genId(),
-            options: {
-                duration: 3000,
-                position: Toasts.Position.BOTTOM
-            }
+        return showToast({
+            text: "That collection already exists",
+            variant: "critical",
+            duration: 3000,
+            position: "bottom"
         });
 
     // gifs shouldnt be empty because to create a collection you need to right click an image / gif and then create it yk. but cant hurt to have a null-conditional check RIGHT?
@@ -165,7 +162,7 @@ export const renameCollection = async (oldName: string, newName: string): Promis
     const collections = await getCollections();
     const res = renameInList(collections, oldName, newName);
     if (!res.ok) {
-        Toasts.show({ message: res.error ?? "Rename failed", type: Toasts.Type.FAILURE, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+        showToast({ text: res.error ?? "Rename failed", variant: "critical", duration: 3000, position: "bottom" });
         return false;
     }
     await DataStore.set(DATA_COLLECTION_NAME, res.collections);

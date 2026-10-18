@@ -5,7 +5,7 @@
 */
 
 import { ModalContent, ModalFooter, ModalHeader, ModalProps, ModalRoot, ModalSize, openModal } from "@utils/modal";
-import { Button, Forms, React, Text, Toasts, useEffect, useRef, useState } from "@webpack/common";
+import { Button, Forms, React, showToast, Text, useEffect, useRef, useState } from "@webpack/common";
 
 import { FONT_STACKS, measureTextLayer } from "../utils/caption";
 import { composite, EditorModel, exportCaptioned, TextLayer } from "../utils/captionExport";
@@ -292,12 +292,12 @@ function Editor({ initial, modalProps }: { initial: { blob: Blob; ext: string; }
             const d = decRef.current!, m = model.current!;
             const { blob, filename } = await exportCaptioned(d.frames, d.delays, m);
             if (stageBlob(blob, filename)) {
-                Toasts.show({ message: "Captioned media added to your message", type: Toasts.Type.SUCCESS, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+                showToast({ text: "Captioned media added to your message", variant: "success", duration: 3000, position: "bottom" });
                 modalProps.onClose();
             }
         } catch (e) {
             console.error("[GifManager] caption export failed", e);
-            Toasts.show({ message: "Caption export failed — see console", type: Toasts.Type.FAILURE, id: Toasts.genId(), options: { duration: 4000, position: Toasts.Position.BOTTOM } });
+            showToast({ text: "Caption export failed — see console", variant: "critical", duration: 4000, position: "bottom" });
         } finally { setBusy(false); }
     }
 

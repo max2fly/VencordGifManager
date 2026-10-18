@@ -18,7 +18,7 @@
 
 import type { PluginNative } from "@utils/types";
 import { findByPropsLazy } from "@webpack";
-import { SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
+import { SelectedChannelStore, showToast, UserStore } from "@webpack/common";
 
 import * as CollectionManager from "../CollectionManager";
 import { EXT_MIME, VIDEO_EXTS } from "../constants";
@@ -51,8 +51,8 @@ interface PendingRecovery {
 const pending = new Map<string, PendingRecovery>();
 const PENDING_TTL_MS = 10 * 60 * 1000;
 
-function toast(message: string, type: number) {
-    Toasts.show({ message, type, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+function toast(message: string, variant: "default" | "success" | "critical" = "default") {
+    showToast({ text: message, variant, duration: 3000, position: "bottom" });
 }
 
 function prunePending() {
@@ -66,14 +66,14 @@ function prunePending() {
  * composer, and register a pending recovery so we can rebase to the new url once it's sent.
  */
 export async function recoverGif(record: GifRecord): Promise<void> {
-    if (!record.localExt) return toast("This gif isn't backed up locally — can't recover it", Toasts.Type.FAILURE);
+    if (!record.localExt) return toast("This gif isn't backed up locally — can't recover it", "critical");
 
     const channelId = SelectedChannelStore.getChannelId();
     if (!channelId) return;
-    if (!UploadAttachmentStore?.addFiles) return toast("Upload module not ready — try again", Toasts.Type.FAILURE);
+    if (!UploadAttachmentStore?.addFiles) return toast("Upload module not ready — try again", "critical");
 
     const raw = await Native.readGif(hashKey(record.key), record.localExt);
-    if (!raw) return toast("Local backup file is missing", Toasts.Type.FAILURE);
+    if (!raw) return toast("Local backup file is missing", "critical");
 
     let blob = new Blob([raw], { type: EXT_MIME[record.localExt] ?? "application/octet-stream" });
     let ext = record.localExt;
@@ -81,7 +81,7 @@ export async function recoverGif(record: GifRecord): Promise<void> {
 
     if (VIDEO_EXTS.includes(record.localExt)) {
         try {
-            toast("Converting to gif…", Toasts.Type.MESSAGE);
+            toast("Converting to gif…", "default");
             blob = await videoToGif(blob);
             ext = "gif";
             filename = "gif.gif";
@@ -105,7 +105,7 @@ export async function recoverGif(record: GifRecord): Promise<void> {
     }
 
     if (!stageBlob(blob, filename, channelId)) return;
-    toast("Recovered from local backup — added to your message", Toasts.Type.SUCCESS);
+    toast("Recovered from local backup — added to your message", "success");
 }
 
 /**
@@ -182,7 +182,7 @@ async function rebase(p: PendingRecovery, newUrl: string, width?: number, height
         // 4. Atomically swap the native favorite (one proto update — no "kept both" race).
         nativeRebaseFavorite(p.oldUrl, { id: "", url: newUrl, src: newUrl, width: old.width, height: old.height });
 
-        toast("Gif rebased to the new working url", Toasts.Type.SUCCESS);
+        toast("Gif rebased to the new working url", "success");
     } catch (e) {
         console.error("[GifManager] rebase failed", e);
     }

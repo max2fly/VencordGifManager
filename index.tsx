@@ -23,7 +23,7 @@ import { definePluginSettings } from "@api/Settings";
 import { Devs } from "@utils/constants";
 import { ModalContent, ModalFooter, ModalHeader, ModalProps, ModalRoot, openModal } from "@utils/modal";
 import definePlugin, { OptionType } from "@utils/types";
-import { Alerts, Button, ContextMenuApi, FluxDispatcher, Forms, Menu, React, TextInput, Toasts, useCallback, useState } from "@webpack/common";
+import { Alerts, Button, ContextMenuApi, FluxDispatcher, Forms, Menu, React, showToast, TextInput, useCallback, useState } from "@webpack/common";
 
 import * as CollectionManager from "./CollectionManager";
 import { GIF_ITEM_PREFIX, TRASH_CATEGORY_NAME } from "./constants";
@@ -121,7 +121,7 @@ export const settings = definePluginSettings({
                 onConfirm: async () => {
                     const n = await purgeTrash();
                     const leaked = await sweepLeakedFiles();
-                    Toasts.show({ message: `Removed ${n} trashed gif(s) + ${leaked} leaked file(s)`, type: Toasts.Type.SUCCESS, id: Toasts.genId() });
+                    showToast({ text: `Removed ${n} trashed gif(s) + ${leaked} leaked file(s)`, variant: "success" });
                 }
             })}>
                 Empty Trashcan
@@ -158,7 +158,7 @@ const addCollectionContextMenuPatch: NavContextMenuPatchCallback = (children, pr
                 action={async () => {
                     const src = await loadSource({ url: gif.url, src: gif.src });
                     if (src) openCaptionEditor(src);
-                    else Toasts.show({ message: "Couldn't load this media", type: Toasts.Type.FAILURE, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+                    else showToast({ text: "Couldn't load this media", variant: "critical", duration: 3000, position: "bottom" });
                 }}
             />
         );
@@ -171,7 +171,7 @@ const addCollectionContextMenuPatch: NavContextMenuPatchCallback = (children, pr
                     action={async () => {
                         const src = await loadSource({ url: gif.url, src: gif.src });
                         if (src) await convertAndStage(src.blob, src.ext);
-                        else Toasts.show({ message: "Couldn't load this media", type: Toasts.Type.FAILURE, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+                        else showToast({ text: "Couldn't load this media", variant: "critical", duration: 3000, position: "bottom" });
                     }}
                 />
             );
@@ -595,7 +595,7 @@ export default definePlugin({
                 action={async () => {
                     const src = await loadSource(item);
                     if (src) openCaptionEditor(src);
-                    else Toasts.show({ message: "Couldn't load this media", type: Toasts.Type.FAILURE, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+                    else showToast({ text: "Couldn't load this media", variant: "critical", duration: 3000, position: "bottom" });
                 }}
             />,
             // Offer convert for anything that ISN'T already a gif — videos (→ animated gif) and
@@ -609,7 +609,7 @@ export default definePlugin({
                     action={async () => {
                         const src = await loadSource(item);
                         if (src) await convertAndStage(src.blob, src.ext);
-                        else Toasts.show({ message: "Couldn't load this media", type: Toasts.Type.FAILURE, id: Toasts.genId(), options: { duration: 3000, position: Toasts.Position.BOTTOM } });
+                        else showToast({ text: "Couldn't load this media", variant: "critical", duration: 3000, position: "bottom" });
                     }}
                 />
                 : null,
