@@ -227,7 +227,7 @@ function removeOutlineStyle() { document.getElementById(OUTLINE_STYLE_ID)?.remov
 
 export default definePlugin({
     name: "GifManager",
-    description: "Locally backs up favorited gifs and organizes them into collections",
+    description: "Locally backs up favorited gifs and organizes them into collections. Prevents embed failures and has in app image/gif editor",
     authors: [Devs.Aria, {id: 236950175480807424n, name: "max2fly" }],
     patches: [
         {
