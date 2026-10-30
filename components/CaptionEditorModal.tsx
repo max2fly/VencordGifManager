@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
 */
 
+import { Button } from "@components/Button";
+import { Divider } from "@components/Divider";
+import { Heading } from "@components/Heading";
+import { Text } from "@components/Text";
 import { ModalContent, ModalFooter, ModalHeader, ModalProps, ModalRoot, ModalSize, openModal } from "@utils/modal";
-import { Button, Forms, React, showToast, Text, useEffect, useRef, useState } from "@webpack/common";
+import { React, showToast, useEffect, useRef, useState } from "@webpack/common";
 
 import { FONT_STACKS, measureTextLayer } from "../utils/caption";
 import { composite, EditorModel, exportCaptioned, TextLayer } from "../utils/captionExport";
@@ -330,7 +334,7 @@ function Editor({ initial, modalProps }: { initial: { blob: Blob; ext: string; }
 
     return (
         <ModalRoot {...modalProps} size={ModalSize.DYNAMIC}>
-            <ModalHeader><Text variant="heading-lg/semibold">Caption editor</Text></ModalHeader>
+            <ModalHeader><Text size="lg" weight="semibold">Caption editor</Text></ModalHeader>
             <ModalContent>
                 <div onPaste={onPaste} style={{ display: "flex", gap: 16, padding: "12px 0", minHeight: 300, color: "var(--text-default, var(--text-normal, #dbdee1))" }}>
                     {!m ? (
@@ -345,9 +349,9 @@ function Editor({ initial, modalProps }: { initial: { blob: Blob; ext: string; }
                             }}
                         >
                             <div style={{ fontSize: 40 }}>🖼️</div>
-                            <Text variant="text-md/semibold">Drag an image, gif or video here</Text>
-                            <Text variant="text-sm/normal">or click to browse — you can also paste an image (Ctrl+V)</Text>
-                            {error && <Text variant="text-sm/semibold" style={{ color: "var(--text-danger)" }}>{error}</Text>}
+                            <Text size="md" weight="semibold">Drag an image, gif or video here</Text>
+                            <Text size="sm">or click to browse — you can also paste an image (Ctrl+V)</Text>
+                            {error && <Text size="sm" weight="semibold" style={{ color: "var(--text-danger)" }}>{error}</Text>}
                         </div>
                     ) : (
                         <>
@@ -379,26 +383,26 @@ function Editor({ initial, modalProps }: { initial: { blob: Blob; ext: string; }
                             </div>
 
                             <div style={{ flex: "0 0 210px", display: "flex", flexDirection: "column", gap: 8 }}>
-                                <Button size={Button.Sizes.SMALL} onClick={() => addText()}>+ Add text</Button>
+                                <Button size="small" onClick={() => addText()}>+ Add text</Button>
 
-                                <Forms.FormTitle style={{ marginBottom: 0 }}>Background</Forms.FormTitle>
+                                <Heading style={{ marginBottom: 0 }}>Background</Heading>
                                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                                     <input type="color" value={/^#/.test(m.bg) ? m.bg : "#ffffff"} onChange={e => { m.bg = e.currentTarget.value; rerender(); }} />
-                                    <Button size={Button.Sizes.MIN} look={Button.Looks.LINK} onClick={() => { m.bg = "transparent"; rerender(); }}>transparent</Button>
+                                    <Button size="min" variant="secondary" onClick={() => { m.bg = "transparent"; rerender(); }}>transparent</Button>
                                 </div>
 
                                 {st ? (
                                     <>
-                                        <Forms.FormDivider />
-                                        <Forms.FormTitle style={{ marginBottom: 0 }}>Text</Forms.FormTitle>
+                                        <Divider />
+                                        <Heading style={{ marginBottom: 0 }}>Text</Heading>
                                         <select value={Object.keys(FONT_STACKS).find(k => FONT_STACKS[k] === st.font) ?? "Impact"} onChange={e => patch({ font: FONT_STACKS[e.currentTarget.value] })}>
                                             {Object.keys(FONT_STACKS).map(k => <option key={k} value={k}>{k}</option>)}
                                         </select>
                                         <div style={{ display: "flex", gap: 6 }}>
-                                            <Button size={Button.Sizes.MIN} color={st.bold ? Button.Colors.BRAND : Button.Colors.PRIMARY} onClick={() => patch({ bold: !st.bold })}><b>B</b></Button>
-                                            <Button size={Button.Sizes.MIN} color={st.italic ? Button.Colors.BRAND : Button.Colors.PRIMARY} onClick={() => patch({ italic: !st.italic })}><i>I</i></Button>
+                                            <Button size="min" variant={st.bold ? "primary" : "secondary"} onClick={() => patch({ bold: !st.bold })}><b>B</b></Button>
+                                            <Button size="min" variant={st.italic ? "primary" : "secondary"} onClick={() => patch({ italic: !st.italic })}><i>I</i></Button>
                                             {(["left", "center", "right"] as const).map(a =>
-                                                <Button key={a} size={Button.Sizes.MIN} color={st.align === a ? Button.Colors.BRAND : Button.Colors.PRIMARY} onClick={() => patch({ align: a })}>{a[0].toUpperCase()}</Button>)}
+                                                <Button key={a} size="min" variant={st.align === a ? "primary" : "secondary"} onClick={() => patch({ align: a })}>{a[0].toUpperCase()}</Button>)}
                                         </div>
                                         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                                             <span style={{ fontSize: 12 }}>Fill</span>
@@ -414,7 +418,7 @@ function Editor({ initial, modalProps }: { initial: { blob: Blob; ext: string; }
                                         {st.outline && <input type="range" min={0} max={30} value={Math.round(st.outlineW * 100)} onChange={e => patch({ outlineW: Number(e.currentTarget.value) / 100 })} />}
                                         <span style={{ fontSize: 12 }}>Font size</span>
                                         <input type="range" min={8} max={200} value={Math.round(st.fontPx)} onChange={e => patch({ fontPx: Number(e.currentTarget.value) })} />
-                                        <Button size={Button.Sizes.SMALL} color={Button.Colors.RED} onClick={deleteSel}>Delete text</Button>
+                                        <Button size="small" variant="dangerPrimary" onClick={deleteSel}>Delete text</Button>
                                     </>
                                 ) : <span style={{ fontSize: 12, lineHeight: "16px" }}>Drag to move · corner = resize · top dot = rotate · white edge squares = crop/extend the canvas · double-click empty space to add text, or a text box to edit it.</span>}
                             </div>
@@ -426,7 +430,7 @@ function Editor({ initial, modalProps }: { initial: { blob: Blob; ext: string; }
             </ModalContent>
             <ModalFooter>
                 <Button style={{ marginLeft: 12 }} disabled={busy || !m} onClick={addToMessage}>{busy ? "Rendering…" : "Add to message"}</Button>
-                <Button color={Button.Colors.TRANSPARENT} look={Button.Looks.LINK} onClick={modalProps.onClose}>Cancel</Button>
+                <Button variant="secondary" onClick={modalProps.onClose}>Cancel</Button>
             </ModalFooter>
         </ModalRoot>
     );

@@ -18,12 +18,17 @@
 
 // Plugin idea by brainfreeze (668137937333911553) 😎
 
+import "./styles.css";
+
 import { addContextMenuPatch, findGroupChildrenByChildId, NavContextMenuPatchCallback, removeContextMenuPatch } from "@api/ContextMenu";
 import { definePluginSettings } from "@api/Settings";
+import { Button } from "@components/Button";
+import { Heading } from "@components/Heading";
+import { Paragraph } from "@components/Paragraph";
 import { Devs } from "@utils/constants";
 import { ModalContent, ModalFooter, ModalHeader, ModalProps, ModalRoot, openModal } from "@utils/modal";
 import definePlugin, { OptionType } from "@utils/types";
-import { Alerts, Button, ContextMenuApi, FluxDispatcher, Forms, Menu, React, showToast, TextInput, useCallback, useState } from "@webpack/common";
+import { Alerts, ContextMenuApi, FluxDispatcher, Menu, React, showToast, TextInput, useCallback, useState } from "@webpack/common";
 
 import * as CollectionManager from "./CollectionManager";
 import { GIF_ITEM_PREFIX, TRASH_CATEGORY_NAME } from "./constants";
@@ -63,12 +68,12 @@ export const settings = definePluginSettings({
         type: OptionType.COMPONENT,
         description: "GifPaste tip",
         component: () => (
-            <Forms.FormText style={{ marginBottom: "8px" }}>
+            <Paragraph style={{ marginBottom: "8px" }}>
                 Tip: enable the built-in <b>GifPaste</b> plugin if you want clicking a gif to insert
                 its link into the chat box instead of sending immediately. GifManager works alongside
                 it and only takes over the click for gifs whose source was deleted (to recover them
                 from your local backup).
-            </Forms.FormText>
+            </Paragraph>
         )
     },
     defaultEmptyCollectionImage: {
@@ -92,7 +97,7 @@ export const settings = definePluginSettings({
                     body: "Importing collections will overwrite your current collections.",
                     confirmText: "Import",
                     // wow this works?
-                    confirmColor: Button.Colors.RED,
+                    confirmColor: "gifmgr-danger-btn",
                     cancelText: "Nevermind",
                     onConfirm: async () => uploadGifCollections()
 
@@ -112,11 +117,11 @@ export const settings = definePluginSettings({
         type: OptionType.COMPONENT,
         description: "Empty the trashcan (permanently delete all cached gifs that aren't favorited or in a collection)",
         component: () =>
-            <Button color={Button.Colors.RED} onClick={() => Alerts.show({
+            <Button variant="dangerPrimary" onClick={() => Alerts.show({
                 title: "Empty trashcan?",
                 body: "This permanently deletes the local backups of all cached gifs that are no longer favorited or in a collection. This cannot be undone.",
                 confirmText: "Delete",
-                confirmColor: Button.Colors.RED,
+                confirmColor: "gifmgr-danger-btn",
                 cancelText: "Nevermind",
                 onConfirm: async () => {
                     const n = await purgeTrash();
@@ -689,7 +694,7 @@ export default definePlugin({
                             title: "Are you sure?",
                             body: "Do you really want to delete this collection?",
                             confirmText: "Delete",
-                            confirmColor: Button.Colors.RED,
+                            confirmColor: "gifmgr-danger-btn",
                             cancelText: "Nevermind",
                             onConfirm: async () => { await CollectionManager.deleteCollection(item.name); refresh(); }
                         })}
@@ -822,17 +827,17 @@ function CreateCollectionModal({ gif, onClose, modalProps }: CreateCollectionMod
         <ModalRoot {...modalProps}>
             <form onSubmit={onSubmit}>
                 <ModalHeader>
-                    <Forms.FormText>Create Collection</Forms.FormText>
+                    <Paragraph>Create Collection</Paragraph>
                 </ModalHeader>
                 <ModalContent>
-                    <Forms.FormTitle tag="h5" style={{ marginTop: "10px" }}>Collection Name</Forms.FormTitle>
+                    <Heading tag="h5" style={{ marginTop: "10px" }}>Collection Name</Heading>
                     <TextInput onChange={(e: string) => setName(e)} />
                 </ModalContent>
                 <div style={{ marginTop: "1rem" }}>
                     <ModalFooter>
                         <Button
                             type="submit"
-                            color={Button.Colors.GREEN}
+                            variant="positive"
                             disabled={!name.length}
                             onClick={onSubmit}
                         >
@@ -858,14 +863,14 @@ function RenameCollectionModal({ currentName, onClose, modalProps }: { currentNa
     return (
         <ModalRoot {...modalProps}>
             <form onSubmit={onSubmit}>
-                <ModalHeader><Forms.FormText>Rename Collection</Forms.FormText></ModalHeader>
+                <ModalHeader><Paragraph>Rename Collection</Paragraph></ModalHeader>
                 <ModalContent>
-                    <Forms.FormTitle tag="h5" style={{ marginTop: "10px" }}>New Name</Forms.FormTitle>
+                    <Heading tag="h5" style={{ marginTop: "10px" }}>New Name</Heading>
                     <TextInput value={name} onChange={(e: string) => setName(e)} />
                 </ModalContent>
                 <div style={{ marginTop: "1rem" }}>
                     <ModalFooter>
-                        <Button type="submit" color={Button.Colors.GREEN} disabled={!name.trim().length} onClick={onSubmit}>Rename</Button>
+                        <Button type="submit" variant="positive" disabled={!name.trim().length} onClick={onSubmit}>Rename</Button>
                     </ModalFooter>
                 </div>
             </form>

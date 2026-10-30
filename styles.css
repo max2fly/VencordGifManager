@@ -1,0 +1,18 @@
+/* Red confirm button for Alerts.show/confirm dialogs.
+   Passed as `confirmColor` to Discord's confirm modal; mirrors Vencord's
+   own `.vc-btn-dangerPrimary` so it tracks Discord's critical-control theme. */
+.gifmgr-danger-btn {
+    background-color: var(--control-critical-primary-background-default);
+    border-color: var(--control-critical-primary-border-default);
+    color: var(--control-critical-primary-text-default);
+}
+
+.gifmgr-danger-btn:hover {
+    background-color: var(--control-critical-primary-background-hover);
+    border-color: var(--control-critical-primary-border-hover);
+    color: var(--control-critical-primary-text-hover);
+}
+
+.gifmgr-danger-btn:active {
+    background-color: var(--control-critical-primary-background-active, var(--control-critical-primary-background-hover));
+}
